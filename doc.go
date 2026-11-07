@@ -1,4 +1,3 @@
-// Package flow provides a persistent workflow engine with resumable node
-// checkpoints, child-flow dispatch, event subscriptions, and generic token
-// payloads. Persistence is implemented with GORM.
-package flow
+// Package goflow provides workflow and assistant engines in the workflows and
+// assistants subpackages.
+package goflow

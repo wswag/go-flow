@@ -1,9 +1,10 @@
-package flow
+package workflows
 
 import (
 	"context"
-	"encoding/json"
 	"time"
+
+	"github.com/wswag/go-flow/tokens"
 )
 
 type FlowStatus string
@@ -260,8 +261,4 @@ type TokenRewrite struct {
 }
 
 // TokenPayload stores generic named sets and optional metadata.
-type TokenPayload struct {
-	Schema string                     `json:"schema,omitempty"`
-	Sets   map[string]json.RawMessage `json:"sets,omitempty"`
-	Meta   map[string]any             `json:"meta,omitempty"`
-}
+type TokenPayload = tokens.TokenPayload

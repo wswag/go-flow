@@ -1,6 +1,6 @@
 # go-flow
 
-`go-flow` is a persistent workflow engine for Go. It stores flow instances,
+`go-flow` provides a persistent workflow engine and an assistant engine for Go. It stores flow instances,
 node checkpoints, and token data through GORM. Flow definitions and token
 payloads are application-owned; the engine provides execution, persistence,
 resume, retry, child-flow dispatch, and status events.
@@ -11,26 +11,28 @@ resume, retry, child-flow dispatch, and status events.
 go get github.com/wswag/go-flow
 ```
 
-## Minimal setup
+## Workflow example
 
 ```go
 import (
 	"context"
 
-	flow "github.com/wswag/go-flow"
+	"github.com/wswag/go-flow/workflows"
+	"github.com/wswag/go-flow/tokens"
+	_ "github.com/wswag/go-flow/tokens/gzip" // registers the gz: storage codec
 	"gorm.io/gorm"
 )
 
 func startExample(ctx context.Context, db *gorm.DB) error {
-	if err := flow.AutoMigrate(db); err != nil {
+	if err := workflows.AutoMigrate(db); err != nil {
 		return err
 	}
-	engine := flow.NewService(flow.NewRepository(db))
-	if err := engine.RegisterFlow(flow.Flow{
+	engine := workflows.NewService(workflows.NewRepository(db))
+	if err := engine.RegisterFlow(workflows.Flow{
 		Name: "example",
-		Nodes: []flow.FlowNode{{
+		Nodes: []workflows.FlowNode{{
 			Name: "finish",
-			Action: func(ctx context.Context, input string, runtime flow.Runtime) (string, error) {
+			Action: func(ctx context.Context, input string, runtime workflows.Runtime) (string, error) {
 				return input, nil
 			},
 		}},
@@ -42,7 +44,45 @@ func startExample(ctx context.Context, db *gorm.DB) error {
 }
 ```
 
-Pass a `*gorm.DB` opened with the database driver used by your application.
+Registering `tokens/gzip` enables transparent compression for persisted workflow
+tokens. The same package provides the shared payload format:
+
+```go
+payload, err := tokens.BuildTokenPayload(
+	map[string]any{"request": map[string]string{"text": "hello"}},
+	map[string]any{"admin.primary_set": "request"},
+)
+if err != nil {
+	return err
+}
+parsed, err := tokens.ParseTokenPayload(payload)
+```
+
+## Assistant example
+
+```go
+import (
+	"github.com/wswag/go-flow/assistants"
+	_ "github.com/wswag/go-flow/tokens/gzip" // registers the gz: storage codec
+	"gorm.io/gorm"
+)
+
+func startAssistant(db *gorm.DB) (*assistants.Service, error) {
+	if err := assistants.AutoMigrate(db); err != nil {
+		return nil, err
+	}
+	service := assistants.NewService(assistants.NewRepository(db))
+	err := service.RegisterChain(assistants.ChainDefinition{
+		Name: "onboarding",
+		Steps: []assistants.StepDefinition{{Name: "profile", Sequence: 1, Input: map[string]any{"name": ""}}},
+	})
+	return service, err
+}
+```
+
+The gzip plugin stores compressible assistant state with the `gz:` marker.
+Existing uncompressed `StateJSON` values have no marker and continue to load as
+plain text. Pass a `*gorm.DB` opened with your application's database driver.
 
 ## Releases
 

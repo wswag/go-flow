@@ -1,4 +1,4 @@
-package flow
+package tokens
 
 import (
 	"encoding/json"
@@ -7,6 +7,13 @@ import (
 	"strings"
 	"sync"
 )
+
+// TokenPayload is the shared generic envelope for named token sets and metadata.
+type TokenPayload struct {
+	Schema string                     `json:"schema,omitempty"`
+	Sets   map[string]json.RawMessage `json:"sets,omitempty"`
+	Meta   map[string]any             `json:"meta,omitempty"`
+}
 
 // defaultTokenPayloadSchema identifies the serialized token payload format.
 const defaultTokenPayloadSchema = "go-flow.token-payload.v1"
