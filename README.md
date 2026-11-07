@@ -84,6 +84,84 @@ The gzip plugin stores compressible assistant state with the `gz:` marker.
 Existing uncompressed `StateJSON` values have no marker and continue to load as
 plain text. Pass a `*gorm.DB` opened with your application's database driver.
 
+### Application-owned access metadata
+
+Each persisted assistant state can also carry an opaque `AccessToken` and an
+indexed `AccessRef`. The assistant package does not interpret either value:
+the application decides how to validate the token and what the reference
+identifies. Keep secrets in `AccessToken`; use `AccessRef` only as a selector,
+such as a public draft ID or a user-context key.
+
+```go
+key := assistants.StateKey{ScopeKey: "public", ActorKey: "draft:abc123"}
+if err := repository.UpdateAccess(ctx, "onboarding", key, "draft:abc123", tokenHash); err != nil {
+	return err
+}
+
+matches, err := repository.FindRecordsByAccessRef(ctx, "draft:abc123")
+if err != nil {
+	return err
+}
+for _, record := range matches {
+	if record.Name == "onboarding" && record.AccessToken == tokenHash {
+		// The application authorizes this request and can bind the state
+		// to the authenticated user's key.
+	}
+}
+```
+
+For a public draft, the application can validate its cookie or bearer token,
+then update the state key and `AccessRef` when the user signs in. It should
+replace or clear the public access token as part of that transition. Keep the
+authorization decision in the application; these fields only store and select
+state.
+
+Create each execution explicitly with `NewRun`. `ScopeKey` and `ActorKey`
+group runs for a scope and actor; the returned `DraftID` identifies one
+specific run. It is the same identifier whether the application exposes the
+run publicly or keeps it private. `AccessRef` and `AccessToken` remain
+independent application-owned access metadata.
+
+```go
+runKey, err := service.NewRun(ctx, "onboarding", assistants.StateKey{
+	ScopeKey: "household:12",
+	ActorKey: "anonymous",
+}, "draft:requested-by-app", tokenHash, assistants.NewRunOptions{
+	DiscardOpen: true,
+})
+if err != nil {
+	return err
+}
+// Use runKey for all reads and commits in this execution. The application
+// validates its credential before allowing public access.
+```
+
+Mark a step `OncePerRun` to prevent its commit callback from running again
+within that `DraftID`. A repeated commit returns the current step snapshot,
+which is already the next step after a successful transition. To start over,
+discard the old run and call `NewRun` again. Generic one-off operations can
+also use `service.ClaimAction(ctx, chainName, runKey, actionKey)`; it returns
+`true` only for the first claim. Discarding the run removes its action claims.
+Set `ExpiresIn` in `NewRunOptions` to enable expiration. `ResolveRun` checks the
+deadline and `ExtendRun` refreshes it. `CleanupRuns` accepts combined filters:
+
+```go
+import "time"
+
+removed, err := service.CleanupRuns(ctx, assistants.CleanupRunsOptions{
+	Expired: true,
+	MinimumAge: 14 * 24 * time.Hour,
+	Statuses: []assistants.RunStatus{assistants.RunStatusDiscarded, assistants.RunStatusCompleted},
+	Limit: 500,
+})
+```
+
+At least one filter is required. When combined, all supplied filters apply.
+The application remains responsible for checking the opaque `AccessToken`
+before exposing a resolved run.
+Set `ExtendTTLOnAction: true` alongside `ExpiresIn` to refresh the deadline
+when the application commits a step, changes step input, or claims an action.
+
 ## Releases
 
 Releases are created from pushes to `main` using Conventional Commits. The

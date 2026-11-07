@@ -2,6 +2,8 @@ package assistants
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -162,6 +164,9 @@ type StepDefinition struct {
 	CanJumpToUnreached   JumpToUnreachedPredicate
 	WorkflowReference    WorkflowReferenceFunc
 	ClientResult         ClientResultFunc
+	// OncePerRun makes the first successful commit authoritative for this step
+	// until the chain state is discarded and a new run is started.
+	OncePerRun bool
 }
 
 // ChainDefinition registriert eine benannte Schrittkette mit sortierten Schritten.
@@ -281,6 +286,7 @@ type compiledStep struct {
 	CanJumpToUnreached   JumpToUnreachedPredicate
 	WorkflowReference    WorkflowReferenceFunc
 	ClientResult         ClientResultFunc
+	OncePerRun           bool
 }
 
 type persistedChainState struct {
@@ -302,6 +308,105 @@ func NewService(repo *Repository) *Service {
 		chains:      map[string]compiledChain{},
 		subscribers: map[chan ChainEvent]struct{}{},
 	}
+}
+
+// NewRun creates an independent assistant run beneath a scope and actor.
+// DraftID identifies the run; access metadata remains application-owned.
+type NewRunOptions struct {
+	DiscardOpen       bool
+	ExpiresIn         time.Duration
+	ExtendTTLOnAction bool
+}
+
+func (s *Service) NewRun(ctx context.Context, chainName string, key StateKey, accessRef, accessToken string, options ...NewRunOptions) (StateKey, error) {
+	chain, err := s.compiledChain(chainName)
+	if err != nil {
+		return StateKey{}, err
+	}
+	if s.repo == nil {
+		return StateKey{}, errors.New("assistant repository is not configured")
+	}
+	var idBytes [24]byte
+	if _, err := rand.Read(idBytes[:]); err != nil {
+		return StateKey{}, err
+	}
+	key.ScopeKey = strings.TrimSpace(key.ScopeKey)
+	key.ActorKey = strings.TrimSpace(key.ActorKey)
+	key.DraftID = hex.EncodeToString(idBytes[:])
+	state := persistedChainState{CurrentStep: s.firstStepName(chain), Steps: map[string]persistedStepState{}}
+	data, err := json.Marshal(state)
+	if err != nil {
+		return StateKey{}, err
+	}
+	opt := NewRunOptions{}
+	if len(options) > 0 {
+		opt = options[0]
+	}
+	if opt.DiscardOpen {
+		if err := s.repo.DiscardOpenRuns(ctx, chain.name, key); err != nil {
+			return StateKey{}, err
+		}
+	}
+	var expiresAt *time.Time
+	if opt.ExpiresIn > 0 {
+		expiry := time.Now().UTC().Add(opt.ExpiresIn)
+		expiresAt = &expiry
+	}
+	err = s.repo.CreateRun(ctx, &ChainRecord{Name: chain.name, ScopeKey: key.ScopeKey, ActorKey: key.ActorKey, DraftID: key.DraftID, AccessRef: strings.TrimSpace(accessRef), AccessToken: accessToken, AccessExpiresAt: expiresAt, AutoExtendTTL: opt.ExtendTTLOnAction, RunTTLSeconds: int64(opt.ExpiresIn / time.Second), Status: string(RunStatusActive), StateJSON: string(data)})
+	if err != nil {
+		return StateKey{}, err
+	}
+	return key, nil
+}
+
+func (s *Service) extendRunAfterAction(ctx context.Context, name string, key StateKey) error {
+	record, err := s.repo.FindRecord(ctx, name, key)
+	if err != nil {
+		return err
+	}
+	if record.AccessExpiresAt != nil && !record.AccessExpiresAt.After(time.Now().UTC()) {
+		return ErrRunExpired
+	}
+	if !record.AutoExtendTTL || record.RunTTLSeconds <= 0 {
+		return nil
+	}
+	return s.repo.SetRunExpiry(ctx, name, key, time.Now().UTC().Add(time.Duration(record.RunTTLSeconds)*time.Second))
+}
+
+// ResolveRun loads an unexpired run by its DraftID. The application validates AccessToken.
+func (s *Service) ResolveRun(ctx context.Context, name string, key StateKey) (DraftSession, error) {
+	record, err := s.repo.FindRecord(ctx, name, key)
+	if err != nil {
+		return DraftSession{}, err
+	}
+	if record.AccessExpiresAt != nil && !record.AccessExpiresAt.After(time.Now().UTC()) {
+		return DraftSession{}, ErrRunExpired
+	}
+	return DraftSession{AssistantName: record.Name, Key: key, AccessRef: record.AccessRef, AccessToken: record.AccessToken, ExpiresAt: record.AccessExpiresAt}, nil
+}
+
+// ExtendRun refreshes the optional expiration deadline for a run.
+func (s *Service) ExtendRun(ctx context.Context, name string, key StateKey, lifetime time.Duration) error {
+	if lifetime <= 0 {
+		return errors.New("run lifetime must be positive")
+	}
+	expiresAt := time.Now().UTC().Add(lifetime)
+	return s.repo.SetRunExpiry(ctx, name, key, expiresAt)
+}
+
+// CleanupExpiredRuns removes expired runs and their action claims.
+func (s *Service) CleanupExpiredRuns(ctx context.Context, limit int) (int64, error) {
+	if s == nil || s.repo == nil {
+		return 0, errors.New("assistant repository is not configured")
+	}
+	return s.repo.CleanupExpiredRuns(ctx, limit)
+}
+
+func (s *Service) CleanupRuns(ctx context.Context, options CleanupRunsOptions) (int64, error) {
+	if s == nil || s.repo == nil {
+		return 0, errors.New("assistant repository is not configured")
+	}
+	return s.repo.CleanupRuns(ctx, options)
 }
 
 // Subscribe liefert serverseitig fortgeschriebene Assistant-Chains.
@@ -370,6 +475,7 @@ func (s *Service) RegisterChain(def ChainDefinition) error {
 			CanJumpToUnreached:   step.CanJumpToUnreached,
 			WorkflowReference:    step.WorkflowReference,
 			ClientResult:         step.ClientResult,
+			OncePerRun:           step.OncePerRun,
 		})
 	}
 	sort.SliceStable(steps, func(i, j int) bool {
@@ -755,6 +861,9 @@ func (s *Service) UpdateStepInput(ctx context.Context, chainName string, key Sta
 	if err := s.checkPrecondition(ctx, chain, key); err != nil {
 		return StepSnapshot{}, ChainSnapshot{}, err
 	}
+	if err := s.extendRunAfterAction(ctx, chain.name, key); err != nil {
+		return StepSnapshot{}, ChainSnapshot{}, err
+	}
 	step, ok := chain.stepByName[strings.TrimSpace(stepName)]
 	if !ok {
 		return StepSnapshot{}, ChainSnapshot{}, fmt.Errorf("assistant step %q not found", strings.TrimSpace(stepName))
@@ -850,6 +959,9 @@ func (s *Service) PersistCommitOutcome(ctx context.Context, chainName string, ke
 	if err := s.checkPrecondition(ctx, chain, key); err != nil {
 		return StepSnapshot{}, ChainSnapshot{}, err
 	}
+	if err := s.extendRunAfterAction(ctx, chain.name, key); err != nil {
+		return StepSnapshot{}, ChainSnapshot{}, err
+	}
 	state, err := s.loadState(ctx, chain.name, key)
 	if err != nil {
 		return StepSnapshot{}, ChainSnapshot{}, err
@@ -916,6 +1028,23 @@ func (s *Service) commitStep(ctx context.Context, chainName string, key StateKey
 	if !found {
 		return StepSnapshot{}, ChainSnapshot{}, fmt.Errorf("assistant step %q not found", requestedStep)
 	}
+	stepDef := chain.stepByName[currentStep.Name]
+	if stepDef.OncePerRun && currentStep.Completed {
+		// The persisted transition already points at the next step. A retried
+		// request is therefore acknowledged by returning the current snapshot;
+		// the action callback is never invoked twice in this run.
+		return s.CurrentStep(ctx, chain.name, key)
+	}
+	claimedOnce := false
+	if stepDef.OncePerRun {
+		claimedOnce, err = s.repo.ClaimAction(ctx, chain.name, key, "step:"+stepDef.Name)
+		if err != nil {
+			return StepSnapshot{}, ChainSnapshot{}, err
+		}
+		if !claimedOnce {
+			return s.CurrentStep(ctx, chain.name, key)
+		}
+	}
 	if !persistCommitInput && commitInput != nil {
 		transientRaw, marshalErr := marshalRaw(commitInput)
 		if marshalErr != nil {
@@ -936,7 +1065,6 @@ func (s *Service) commitStep(ctx context.Context, chainName string, key StateKey
 			return StepSnapshot{}, ChainSnapshot{}, fmt.Errorf("assistant step %q does not allow updates after commit", requestedStep)
 		}
 	}
-	stepDef := chain.stepByName[currentStep.Name]
 	prepare := PrepareContext{
 		ChainName: chain.name,
 		Key:       key,
@@ -955,6 +1083,9 @@ func (s *Service) commitStep(ctx context.Context, chainName string, key StateKey
 	if commitFn != nil {
 		outcome, err = commitFn(ctx, commitCtx)
 		if err != nil {
+			if claimedOnce {
+				_ = s.repo.ReleaseAction(ctx, key.DraftID, "step:"+stepDef.Name)
+			}
 			return StepSnapshot{}, ChainSnapshot{}, err
 		}
 	}
@@ -1001,6 +1132,9 @@ func (s *Service) ResetStep(ctx context.Context, chainName string, key StateKey,
 	stepDef, ok := chain.stepByName[target]
 	if !ok {
 		return StepSnapshot{}, ChainSnapshot{}, fmt.Errorf("assistant step %q not found", target)
+	}
+	if stepDef.OncePerRun {
+		return StepSnapshot{}, ChainSnapshot{}, fmt.Errorf("assistant step %q can only run once; discard this chain and start a new run", target)
 	}
 	state, err := s.loadState(ctx, chain.name, key)
 	if err != nil {
@@ -1113,6 +1247,12 @@ func (s *Service) SetCurrentStepForRecovery(ctx context.Context, chainName strin
 
 // ResetChain verwirft die persistierte Schrittkette vollständig.
 func (s *Service) ResetChain(ctx context.Context, chainName string, key StateKey) error {
+	return s.DiscardChain(ctx, chainName, key)
+}
+
+// DiscardChain removes one assistant run and its action claims. Starting the
+// chain again with the same key creates a fresh run with fresh once-only steps.
+func (s *Service) DiscardChain(ctx context.Context, chainName string, key StateKey) error {
 	s.logAction("reset_chain", chainName, key, "")
 	chain, err := s.compiledChain(chainName)
 	if err != nil {
@@ -1124,7 +1264,19 @@ func (s *Service) ResetChain(ctx context.Context, chainName string, key StateKey
 	if s.repo == nil {
 		return nil
 	}
-	return s.repo.DeleteRecord(ctx, chain.name, key)
+	return s.repo.MarkDiscarded(ctx, chain.name, key)
+}
+
+// ClaimAction reserves an application-defined action once within this run.
+func (s *Service) ClaimAction(ctx context.Context, chainName string, key StateKey, actionKey string) (bool, error) {
+	claimed, err := s.repo.ClaimAction(ctx, chainName, key, actionKey)
+	if err != nil || !claimed {
+		return claimed, err
+	}
+	if err := s.extendRunAfterAction(ctx, chainName, key); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Service) resolveCurrentChain(ctx context.Context, chainName string, key StateKey, autoCommit bool) (ChainSnapshot, error) {
@@ -1331,10 +1483,16 @@ func (s *Service) saveState(ctx context.Context, chainName string, key StateKey,
 	if err != nil {
 		return err
 	}
+	status := RunStatusActive
+	if state.CompletedAt != nil {
+		status = RunStatusCompleted
+	}
 	return s.repo.SaveRecord(ctx, &ChainRecord{
 		Name:      strings.TrimSpace(chainName),
 		ScopeKey:  strings.TrimSpace(key.ScopeKey),
 		ActorKey:  strings.TrimSpace(key.ActorKey),
+		DraftID:   strings.TrimSpace(key.DraftID),
+		Status:    string(status),
 		StateJSON: string(data),
 	})
 }
