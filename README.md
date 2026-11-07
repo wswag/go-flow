@@ -43,3 +43,19 @@ func startExample(ctx context.Context, db *gorm.DB) error {
 ```
 
 Pass a `*gorm.DB` opened with the database driver used by your application.
+
+## Releases
+
+Releases are created from pushes to `main` using Conventional Commits. The
+workflow creates a `vX.Y.Z` Git tag and a GitHub Release when it finds a commit
+that requires a version bump. The first development release starts at `v0.1.0`:
+
+- `fix: ...` creates a patch release.
+- `feat: ...` creates a minor release.
+- `feat!: ...` or a `BREAKING CHANGE:` footer marks a breaking change; before
+  `1.0.0` it increments the minor version, and from `1.0.0` it increments major.
+- Documentation, test, and maintenance commits do not create a release by
+  themselves.
+
+For Go module releases at `v2` and above, update the module path in `go.mod` to
+include the major suffix (for example `/v2`).
