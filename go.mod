@@ -1,6 +1,6 @@
 module github.com/wswag/go-flow
 
-go 1.22
+go 1.21
 
 require (
 	gorm.io/driver/sqlite v1.6.0
