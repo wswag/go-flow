@@ -15,6 +15,7 @@ type TokenBuilder struct {
 	mergeExisting         bool
 	editableSet           *string
 	primarySet            *string
+	tokenType             *string
 	editableValue         any
 	hasEditableValue      bool
 	mergeEditableValue    any
@@ -66,6 +67,9 @@ func (b *TokenBuilder) Meta(key string, value any) *TokenBuilder {
 	if key == tokenPayloadPrimarySetMetaKey {
 		b.primarySet = nil
 	}
+	if key == TokenMetaType {
+		b.tokenType = nil
+	}
 	return b
 }
 
@@ -74,6 +78,13 @@ func (b *TokenBuilder) Meta(key string, value any) *TokenBuilder {
 func (b *TokenBuilder) PrimarySet(key string) *TokenBuilder {
 	key = strings.TrimSpace(key)
 	b.primarySet = &key
+	return b
+}
+
+// Type records the token type metadata.
+func (b *TokenBuilder) Type(tokenType string) *TokenBuilder {
+	tokenType = strings.TrimSpace(tokenType)
+	b.tokenType = &tokenType
 	return b
 }
 
@@ -135,6 +146,12 @@ func (b *TokenBuilder) Build() (string, error) {
 			return "", err
 		}
 	}
+	if b.tokenType != nil {
+		raw, err = SetTokenPayloadType(raw, *b.tokenType)
+		if err != nil {
+			return "", err
+		}
+	}
 	if b.hasEditableValue {
 		return MarshalTokenPayloadEditableSet(raw, b.editableValue)
 	}
@@ -183,6 +200,14 @@ func (r *TokenReader) PrimarySet() string {
 		return ""
 	}
 	return TokenPayloadPrimarySet(r.payload)
+}
+
+// Type returns the token type metadata value.
+func (r *TokenReader) Type() string {
+	if r.err != nil {
+		return ""
+	}
+	return TokenPayloadType(r.payload)
 }
 
 // EditableSet returns the set selected by admin.editable_set metadata.
