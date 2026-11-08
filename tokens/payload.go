@@ -23,6 +23,9 @@ const (
 	tokenPayloadEditableSetMetaKey = "admin.editable_set"
 )
 
+// TokenMetaType is the metadata key that identifies a token's type.
+const TokenMetaType = "token_type"
+
 // compatibleTokenPayloadSchemas stores process-wide schema names accepted for
 // reading, protected because registration and parsing may run concurrently.
 var compatibleTokenPayloadSchemas = struct {
@@ -201,6 +204,31 @@ func SetTokenPayloadPrimarySetKey(raw string, key string) (string, error) {
 // TokenPayloadEditableSet returns the set named by admin.editable_set metadata.
 func TokenPayloadEditableSet(payload TokenPayload) string {
 	return stringFromAny(payload.Meta[tokenPayloadEditableSetMetaKey])
+}
+
+// TokenPayloadType returns the token type metadata value.
+func TokenPayloadType(payload TokenPayload) string {
+	return stringFromAny(payload.Meta[TokenMetaType])
+}
+
+// SetTokenPayloadType sets the token type metadata while
+// preserving the token's sets and other metadata.
+func SetTokenPayloadType(raw string, tokenType string) (string, error) {
+	tokenType = strings.TrimSpace(tokenType)
+	if tokenType == "" {
+		return "", errors.New("workflow token type is empty")
+	}
+	payload, err := ParseTokenPayload(raw)
+	if err != nil {
+		return "", err
+	}
+	payload.Meta[TokenMetaType] = tokenType
+	payload.Schema = defaultTokenPayloadSchema
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
 }
 
 // SetTokenPayloadEditableSetKey changes the set key recorded by
