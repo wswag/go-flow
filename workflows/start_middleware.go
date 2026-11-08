@@ -14,9 +14,19 @@ type StartRequest struct {
 type StartFlowNext func(ctx context.Context, request StartRequest) (*FlowExecutionContext, error)
 
 // StartMiddleware can modify a workflow start or return an execution directly
-// without starting a new flow. Call next to continue the chain.
+// without starting a new flow. Call next to continue the chain. A middleware
+// that allocates resources during Start can also implement
+// StartMiddlewareRollback to clean them up if starting fails synchronously.
 type StartMiddleware interface {
 	Start(ctx context.Context, request StartRequest, next StartFlowNext) (*FlowExecutionContext, error)
+}
+
+// StartMiddlewareRollback is an optional interface for middleware that needs
+// to undo setup when the start chain or the synchronous workflow start fails.
+// RollbackStart is called in reverse middleware order. It is not called for
+// errors that occur later while the workflow is executing.
+type StartMiddlewareRollback interface {
+	RollbackStart(ctx context.Context, request StartRequest, startErr error) error
 }
 
 // StartMiddlewareFunc adapts a function to the StartMiddleware interface.

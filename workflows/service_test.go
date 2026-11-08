@@ -872,7 +872,7 @@ func TestServiceCorrelationFailureWaitsForAllParallelFlows(t *testing.T) {
 		t.Fatalf("register failed child: %v", err)
 	}
 	var calls []CorrelationFailureEvent
-	svc.RegisterCorrelationFailureHook(func(_ context.Context, event CorrelationFailureEvent) {
+	svc.RegisterCorrelationFailureHook(func(_ context.Context, _ *Service, event CorrelationFailureEvent) {
 		calls = append(calls, event)
 	})
 	now := time.Now().UTC()
@@ -922,6 +922,53 @@ func TestServiceCorrelationFailureWaitsForAllParallelFlows(t *testing.T) {
 	}
 	if calls[0].FlowEvent.FlowInstanceID != failed.ID || calls[0].FlowEvent.FlowName != failed.Name || calls[0].FlowEvent.Status != FlowStatusFailed {
 		t.Fatalf("failure event = %#v, want failed child %d", calls[0].FlowEvent, failed.ID)
+	}
+}
+
+func TestTerminalHookCanDecodeStartTokenSetThroughService(t *testing.T) {
+	db := openFlowTestDB(t)
+	if err := AutoMigrate(db); err != nil {
+		t.Fatalf("auto migrate flow tables: %v", err)
+	}
+	svc := NewService(NewRepository(db))
+	if err := svc.RegisterFlow(Flow{Name: "terminal-hook-token", Nodes: []FlowNode{{Name: "run", Action: func(_ context.Context, input string, _ Runtime) (string, error) {
+		return input, nil
+	}}}}); err != nil {
+		t.Fatalf("register flow: %v", err)
+	}
+	type state struct {
+		Value string `json:"value"`
+	}
+	gotState := make(chan state, 1)
+	hookErr := make(chan error, 1)
+	svc.RegisterTerminalHook(func(ctx context.Context, engine *Service, event FlowEvent) {
+		var decoded state
+		err := engine.DecodeFlowStartTokenMetaSet(ctx, event.FlowInstanceID, TokenMetaFlowStateSet, &decoded)
+		if err != nil {
+			hookErr <- err
+			return
+		}
+		gotState <- decoded
+	})
+
+	startToken, err := NewFlowTokenBuilder("terminal-hook-token", "run", state{Value: "from-start"}).Build()
+	if err != nil {
+		t.Fatalf("build start token: %v", err)
+	}
+	exec, err := svc.StartFlow(context.Background(), "terminal-hook-token", startToken)
+	if err != nil {
+		t.Fatalf("start flow: %v", err)
+	}
+	waitForDone(t, exec.Done())
+	select {
+	case err := <-hookErr:
+		t.Fatalf("decode start token set in hook: %v", err)
+	case got := <-gotState:
+		if got.Value != "from-start" {
+			t.Fatalf("decoded start state = %#v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("terminal hook did not decode start token set")
 	}
 }
 
