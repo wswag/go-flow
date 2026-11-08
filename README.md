@@ -99,7 +99,10 @@ example `workflows.GetInterface[Notifier](request)`. When middleware redirects
 a start to another flow name, the next middleware sees that flow's registered
 dependencies. A caller can pass `StartOptions{UserInterfaces: []any{...}}` to
 override matching flow-level dependencies for that start; lookup falls back to
-the flow definition for types not supplied by the caller.
+the flow definition for types not supplied by the caller. Dependencies can
+also be registered once on the engine with `engine.RegisterUserInterface(x)`;
+they are used only if neither the call nor the flow definition provides a
+matching type.
 
 ### Fluent token access
 

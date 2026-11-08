@@ -15,11 +15,11 @@ type userInterfaceResolver interface {
 	resolveUserInterface(reflect.Type) (any, error)
 }
 
-// GetInterface resolves an application dependency registered in the current
-// flow definition. source may be a Runtime (for node actions and action
-// middlewares) or a StartRequest (for start middlewares). Go does not support
-// generic methods, so this is a package function used as
-// workflows.GetInterface[MyInterface](runtime) or
+// GetInterface resolves an application dependency from a Runtime (node action
+// or action middleware) or StartRequest (start middleware). Resolution
+// prioritizes call-specific values, then flow-definition values, then
+// engine-level values. Go does not support generic methods, so this is a
+// package function used as workflows.GetInterface[MyInterface](runtime) or
 // workflows.GetInterface[MyInterface](request).
 //
 // The registered value must be assignable to T. No match and multiple matches
@@ -49,15 +49,17 @@ func (r *executionRuntime) resolveUserInterface(targetType reflect.Type) (any, e
 	if r == nil {
 		return nil, errors.New("workflow runtime is not configured")
 	}
-	return resolveUserInterfaceFrom(r.callInterfaces, r.flowInterfaces, targetType)
+	return resolveUserInterfaceFrom(r.callInterfaces, r.flowInterfaces, r.engineInterfaces, targetType)
 }
 
-func resolveUserInterfaceFrom(preferred, fallback []any, targetType reflect.Type) (any, error) {
-	resolved, err := resolveUserInterfaceIn(preferred, targetType)
-	if err == nil || !errors.Is(err, ErrUserInterfaceNotFound) {
-		return resolved, err
+func resolveUserInterfaceFrom(callInterfaces, flowInterfaces, engineInterfaces []any, targetType reflect.Type) (any, error) {
+	for _, dependencies := range [][]any{callInterfaces, flowInterfaces, engineInterfaces} {
+		resolved, err := resolveUserInterfaceIn(dependencies, targetType)
+		if err == nil || !errors.Is(err, ErrUserInterfaceNotFound) {
+			return resolved, err
+		}
 	}
-	return resolveUserInterfaceIn(fallback, targetType)
+	return nil, fmt.Errorf("%w: %s", ErrUserInterfaceNotFound, targetType)
 }
 
 func resolveUserInterfaceIn(dependencies []any, targetType reflect.Type) (any, error) {
@@ -91,4 +93,12 @@ func isNilable(kind reflect.Kind) bool {
 	default:
 		return false
 	}
+}
+
+func isNilUserInterface(value any) bool {
+	if value == nil {
+		return true
+	}
+	reflected := reflect.ValueOf(value)
+	return isNilable(reflected.Kind()) && reflected.IsNil()
 }

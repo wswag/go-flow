@@ -93,10 +93,11 @@ type FlowExecutionContext struct {
 	Reused           bool
 	Error            error
 
-	done              chan struct{}
-	startMiddlewares  []StartMiddleware
-	actionMiddlewares []ActionMiddleware
-	userInterfaces    []any
+	done                 chan struct{}
+	startMiddlewares     []StartMiddleware
+	actionMiddlewares    []ActionMiddleware
+	userInterfaces       []any
+	engineUserInterfaces []any
 }
 
 // StartOptions describes optional behavior for StartFlow. TargetFlowName
@@ -128,7 +129,9 @@ type StartOptions struct {
 	// UserInterfaces supplies call-specific dependencies. They take precedence
 	// over matching dependencies in Flow.UserInterfaces and are process-local,
 	// so they are not restored after a process restart.
-	UserInterfaces []any
+	UserInterfaces          []any
+	engineUserInterfaces    []any
+	engineUserInterfacesSet bool
 }
 
 // CorrelationFailureEvent beschreibt den terminalen Fehler eines Laufs innerhalb

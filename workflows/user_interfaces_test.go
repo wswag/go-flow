@@ -14,6 +14,14 @@ type testGreeterValue string
 
 func (g testGreeterValue) Greet() string { return string(g) }
 
+type testEngineMarker interface {
+	Marker() string
+}
+
+type testEngineMarkerValue string
+
+func (m testEngineMarkerValue) Marker() string { return string(m) }
+
 func TestFlowUserInterfaceCanBeResolvedFromNode(t *testing.T) {
 	svc := NewService(NewRepository(openFlowTestDB(t)))
 	if err := AutoMigrate(svc.store.db); err != nil {
@@ -154,5 +162,77 @@ func TestCallUserInterfaceOverridesFlowDefinitionInMiddlewareAndNode(t *testing.
 		}
 	default:
 		t.Fatal("start middleware did not resolve call-specific dependency")
+	}
+}
+
+func TestEngineUserInterfacesAreLowestPriorityAndAvailableInMiddleware(t *testing.T) {
+	svc := NewService(NewRepository(openFlowTestDB(t)))
+	if err := AutoMigrate(svc.store.db); err != nil {
+		t.Fatalf("auto migrate flow tables: %v", err)
+	}
+	if err := svc.RegisterUserInterfaces(testGreeterValue("engine greeter"), testEngineMarkerValue("engine marker")); err != nil {
+		t.Fatalf("register engine dependencies: %v", err)
+	}
+	if err := svc.RegisterFlow(Flow{
+		Name:           "engine-dependency-flow",
+		UserInterfaces: []any{testGreeterValue("flow greeter")},
+		Nodes: []FlowNode{{Name: "run", Action: func(_ context.Context, _ string, runtime Runtime) (string, error) {
+			greeter, err := GetInterface[testGreeter](runtime)
+			if err != nil {
+				return "", err
+			}
+			marker, err := GetInterface[testEngineMarker](runtime)
+			if err != nil {
+				return "", err
+			}
+			return greeter.Greet() + ":" + marker.Marker(), nil
+		}}},
+	}); err != nil {
+		t.Fatalf("register flow: %v", err)
+	}
+	middlewareMarker := make(chan string, 1)
+	actionMiddlewareMarker := make(chan string, 1)
+	svc.RegisterStartMiddleware(StartMiddlewareFunc(func(ctx context.Context, request StartRequest, next StartFlowNext) (*FlowExecutionContext, error) {
+		marker, err := GetInterface[testEngineMarker](request)
+		if err != nil {
+			return nil, err
+		}
+		middlewareMarker <- marker.Marker()
+		return next(ctx, request)
+	}))
+	svc.RegisterActionMiddleware(ActionMiddlewareFunc(func(next Action) Action {
+		return func(ctx context.Context, input string, runtime Runtime) (string, error) {
+			marker, err := GetInterface[testEngineMarker](runtime)
+			if err != nil {
+				return "", err
+			}
+			actionMiddlewareMarker <- marker.Marker()
+			return next(ctx, input, runtime)
+		}
+	}))
+
+	exec, err := svc.StartFlow(context.Background(), "engine-dependency-flow", "input")
+	if err != nil {
+		t.Fatalf("start flow: %v", err)
+	}
+	waitForDone(t, exec.Done())
+	if exec.EndToken != "flow greeter:engine marker" {
+		t.Fatalf("node resolved %q, want flow greeter:engine marker", exec.EndToken)
+	}
+	select {
+	case marker := <-middlewareMarker:
+		if marker != "engine marker" {
+			t.Fatalf("middleware resolved engine marker %q", marker)
+		}
+	default:
+		t.Fatal("start middleware did not resolve engine dependency")
+	}
+	select {
+	case marker := <-actionMiddlewareMarker:
+		if marker != "engine marker" {
+			t.Fatalf("action middleware resolved engine marker %q", marker)
+		}
+	default:
+		t.Fatal("action middleware did not resolve engine dependency")
 	}
 }

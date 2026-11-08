@@ -15,12 +15,14 @@ type StartRequest struct {
 	UserInterfaces []any
 	// FlowUserInterfaces contains dependencies registered on the flow definition
 	// currently named by FlowName. UserInterfaces contains call-specific values
-	// and takes precedence over this slice.
-	FlowUserInterfaces []any
+	// and takes precedence over this slice. EngineUserInterfaces is the final
+	// fallback tier.
+	FlowUserInterfaces   []any
+	EngineUserInterfaces []any
 }
 
 func (request StartRequest) resolveUserInterface(targetType reflect.Type) (any, error) {
-	return resolveUserInterfaceFrom(request.UserInterfaces, request.FlowUserInterfaces, targetType)
+	return resolveUserInterfaceFrom(request.UserInterfaces, request.FlowUserInterfaces, request.EngineUserInterfaces, targetType)
 }
 
 // StartFlowNext continues the start middleware chain with a request. A
