@@ -36,6 +36,10 @@ type Flow struct {
 	// StartMiddlewares are included when this workflow is started. Sequence
 	// wrappers order them together with engine-level and per-call middleware.
 	StartMiddlewares []StartMiddleware
+	// UserInterfaces contains application-provided dependencies available to
+	// every node in this workflow through GetInterface[T]. Instances are shared
+	// by all executions of this registered flow.
+	UserInterfaces []any
 	// RetryNodeNames declares persisted checkpoints from which a failed run may
 	// be restarted. The engine chooses the nearest declared node at or before
 	// the failed/current node and starts a fresh workflow instance there.
@@ -89,9 +93,11 @@ type FlowExecutionContext struct {
 	Reused           bool
 	Error            error
 
-	done              chan struct{}
-	startMiddlewares  []StartMiddleware
-	actionMiddlewares []ActionMiddleware
+	done                 chan struct{}
+	startMiddlewares     []StartMiddleware
+	actionMiddlewares    []ActionMiddleware
+	userInterfaces       []any
+	engineUserInterfaces []any
 }
 
 // StartOptions describes optional behavior for StartFlow. TargetFlowName
@@ -120,6 +126,12 @@ type StartOptions struct {
 	// engine-level action middleware. These functions are process-local and are
 	// not persisted for a later resume.
 	ActionMiddlewares []ActionMiddleware
+	// UserInterfaces supplies call-specific dependencies. They take precedence
+	// over matching dependencies in Flow.UserInterfaces and are process-local,
+	// so they are not restored after a process restart.
+	UserInterfaces          []any
+	engineUserInterfaces    []any
+	engineUserInterfacesSet bool
 }
 
 // CorrelationFailureEvent beschreibt den terminalen Fehler eines Laufs innerhalb
