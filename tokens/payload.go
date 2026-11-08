@@ -18,6 +18,11 @@ type TokenPayload struct {
 // defaultTokenPayloadSchema identifies the serialized token payload format.
 const defaultTokenPayloadSchema = "go-flow.token-payload.v1"
 
+const (
+	tokenPayloadPrimarySetMetaKey  = "admin.primary_set"
+	tokenPayloadEditableSetMetaKey = "admin.editable_set"
+)
+
 // compatibleTokenPayloadSchemas stores process-wide schema names accepted for
 // reading, protected because registration and parsing may run concurrently.
 var compatibleTokenPayloadSchemas = struct {
@@ -167,10 +172,55 @@ func TokenPayloadSetString(payload TokenPayload, key string) string {
 // metadata keys, preferring admin.primary_set.
 func TokenPayloadPrimarySet(payload TokenPayload) string {
 	// The primary set is authoritative when both metadata keys are present.
-	if key := stringFromAny(payload.Meta["admin.primary_set"]); key != "" {
+	if key := stringFromAny(payload.Meta[tokenPayloadPrimarySetMetaKey]); key != "" {
 		return key
 	}
-	return stringFromAny(payload.Meta["admin.editable_set"])
+	return TokenPayloadEditableSet(payload)
+}
+
+// SetTokenPayloadPrimarySetKey changes the set key recorded by
+// admin.primary_set while preserving the other sets and metadata.
+func SetTokenPayloadPrimarySetKey(raw string, key string) (string, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "", errors.New("token primary set key is empty")
+	}
+	payload, err := ParseTokenPayload(raw)
+	if err != nil {
+		return "", err
+	}
+	payload.Meta[tokenPayloadPrimarySetMetaKey] = key
+	payload.Schema = defaultTokenPayloadSchema
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+// TokenPayloadEditableSet returns the set named by admin.editable_set metadata.
+func TokenPayloadEditableSet(payload TokenPayload) string {
+	return stringFromAny(payload.Meta[tokenPayloadEditableSetMetaKey])
+}
+
+// SetTokenPayloadEditableSetKey changes the set key recorded by
+// admin.editable_set while preserving the other sets and metadata.
+func SetTokenPayloadEditableSetKey(raw string, key string) (string, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "", errors.New("token editable set key is empty")
+	}
+	payload, err := ParseTokenPayload(raw)
+	if err != nil {
+		return "", err
+	}
+	payload.Meta[tokenPayloadEditableSetMetaKey] = key
+	payload.Schema = defaultTokenPayloadSchema
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
 }
 
 // RewriteTokenPayloadSet replaces one named set while preserving all other
@@ -201,6 +251,118 @@ func RewriteTokenPayloadSet(raw string, key string, value any) (string, error) {
 	return string(out), nil
 }
 
+// SetTokenPayloadEditableSet writes an already-serialized JSON value into the
+// set selected by admin.editable_set metadata.
+func SetTokenPayloadEditableSet(raw string, value json.RawMessage) (string, error) {
+	payload, err := ParseTokenPayload(raw)
+	if err != nil {
+		return "", err
+	}
+	key := TokenPayloadEditableSet(payload)
+	if key == "" {
+		return "", errors.New("token payload has no editable_set")
+	}
+	if !json.Valid(value) {
+		return "", fmt.Errorf("set token payload set %q: invalid JSON value", key)
+	}
+	payload.Sets[key] = append(json.RawMessage(nil), value...)
+	payload.Schema = defaultTokenPayloadSchema
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+// MarshalTokenPayloadEditableSet marshals value as JSON and writes it to the
+// set selected by admin.editable_set metadata.
+func MarshalTokenPayloadEditableSet(raw string, value any) (string, error) {
+	encoded, err := marshalTokenSet(value)
+	if err != nil {
+		return "", fmt.Errorf("marshal editable set: %w", err)
+	}
+	return SetTokenPayloadEditableSet(raw, encoded)
+}
+
+// MergeTokenPayloadEditableSet merges fields into the object selected by
+// admin.editable_set metadata. Incoming fields replace existing fields with
+// the same name; all other payload sets and metadata are preserved.
+func MergeTokenPayloadEditableSet(raw string, value any) (string, error) {
+	payload, err := ParseTokenPayload(raw)
+	if err != nil {
+		return "", err
+	}
+	key := TokenPayloadEditableSet(payload)
+	if key == "" {
+		return "", errors.New("token payload has no editable_set")
+	}
+	existing, ok := payload.Sets[key]
+	if !ok {
+		return "", fmt.Errorf("token payload has no set %q", key)
+	}
+	var currentFields map[string]json.RawMessage
+	if err := json.Unmarshal(existing, &currentFields); err != nil || currentFields == nil {
+		if err == nil {
+			err = errors.New("set is not a JSON object")
+		}
+		return "", fmt.Errorf("merge editable set %q: existing value: %w", key, err)
+	}
+	incoming, err := marshalTokenSet(value)
+	if err != nil {
+		return "", fmt.Errorf("merge editable set %q: %w", key, err)
+	}
+	var incomingFields map[string]json.RawMessage
+	if err := json.Unmarshal(incoming, &incomingFields); err != nil || incomingFields == nil {
+		if err == nil {
+			err = errors.New("value is not a JSON object")
+		}
+		return "", fmt.Errorf("merge editable set %q: incoming value: %w", key, err)
+	}
+	for field, fieldValue := range incomingFields {
+		currentFields[field] = fieldValue
+	}
+	merged, err := json.Marshal(currentFields)
+	if err != nil {
+		return "", err
+	}
+	payload.Sets[key] = merged
+	payload.Schema = defaultTokenPayloadSchema
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+// MergeTokenPayload adds or replaces sets and metadata while preserving all
+// existing entries. New values take precedence when keys overlap.
+func MergeTokenPayload(raw string, sets map[string]any, meta map[string]any) (string, error) {
+	payload, err := ParseTokenPayload(raw)
+	if err != nil {
+		return "", err
+	}
+	for key, value := range sets {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		encoded, err := marshalTokenSet(value)
+		if err != nil {
+			return "", fmt.Errorf("marshal token set %q: %w", key, err)
+		}
+		payload.Sets[key] = encoded
+	}
+	for key, value := range meta {
+		payload.Meta[key] = value
+	}
+	payload.Schema = defaultTokenPayloadSchema
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
 // DecodeTokenPayloadSet decodes a named set into target. It returns an error
 // when the payload schema is unsupported, the set is absent, or its JSON
 // cannot be decoded into target.
@@ -209,12 +371,36 @@ func DecodeTokenPayloadSet(raw string, key string, target any) error {
 	if err != nil {
 		return err
 	}
+	return decodeTokenPayloadSet(payload, key, target)
+}
+
+func decodeTokenPayloadSet(payload TokenPayload, key string, target any) error {
 	// Decode only the requested set; other sets and metadata are independent.
-	value, ok := payload.Sets[strings.TrimSpace(key)]
+	key = strings.TrimSpace(key)
+	value, ok := payload.Sets[key]
 	if !ok {
-		return fmt.Errorf("token payload has no set %q", strings.TrimSpace(key))
+		return fmt.Errorf("token payload has no set %q", key)
 	}
 	return json.Unmarshal(value, target)
+}
+
+// DecodeTokenPayloadMetaSet resolves a set key from metadata and decodes that
+// set into target. The metadata value must be a non-empty string.
+func DecodeTokenPayloadMetaSet(raw string, metaKey string, target any) error {
+	payload, err := ParseTokenPayload(raw)
+	if err != nil {
+		return err
+	}
+	return decodeTokenPayloadMetaSet(payload, metaKey, target)
+}
+
+func decodeTokenPayloadMetaSet(payload TokenPayload, metaKey string, target any) error {
+	metaKey = strings.TrimSpace(metaKey)
+	setKey := stringFromAny(payload.Meta[metaKey])
+	if setKey == "" {
+		return fmt.Errorf("token payload has no set key in metadata %q", metaKey)
+	}
+	return decodeTokenPayloadSet(payload, setKey, target)
 }
 
 // stringFromAny returns trimmed string metadata and an empty string for other

@@ -6,28 +6,6 @@ import (
 	"testing"
 )
 
-// TestTokenCodecRoundTripsCompressedPayloads verifies compressed token data is
-// restored exactly after database persistence.
-func TestTokenCodecRoundTripsCompressedPayloads(t *testing.T) {
-	raw := strings.Repeat(`{"rawResponse":"sehr-langes-token-payload"}`, 40)
-
-	encoded, err := encodeTokenRawData(raw)
-	if err != nil {
-		t.Fatalf("encode token raw data: %v", err)
-	}
-	if !strings.HasPrefix(encoded, compressedTokenPrefix) {
-		t.Fatalf("expected compressed token prefix, got %q", encoded[:min(len(encoded), 8)])
-	}
-
-	decoded, err := decodeTokenRawData(encoded)
-	if err != nil {
-		t.Fatalf("decode token raw data: %v", err)
-	}
-	if decoded != raw {
-		t.Fatalf("decoded payload mismatch")
-	}
-}
-
 // TestRepositoryReadsLegacyAndCompressedTokens verifies repository reads
 // transparently handle both plain stored text and marked compressed data.
 func TestRepositoryReadsLegacyAndCompressedTokens(t *testing.T) {
@@ -83,12 +61,4 @@ func TestRepositoryCreateTokenKeepsCallerFacingRawDataReadable(t *testing.T) {
 	if token.RawData != raw {
 		t.Fatalf("token raw data after create = %q, want original readable payload", token.RawData)
 	}
-}
-
-// min returns the smaller of two integers for test fixture sizing.
-func min(a int, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

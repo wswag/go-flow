@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wswag/go-flow/tokens"
+
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -318,8 +320,8 @@ func TestServiceRetryFlowInstanceStartsFreshRunAndSupersedesFailure(t *testing.T
 	if updatedFailed.DiscardedAt == nil {
 		t.Fatal("superseded failed flow is still visible")
 	}
-	payload, err := ParseTokenPayload(retried.StartToken)
-	if err != nil || TokenPayloadSetString(payload, "value") != "edited" {
+	payload, err := tokens.ParseTokenPayload(retried.StartToken)
+	if err != nil || tokens.TokenPayloadSetString(payload, "value") != "edited" {
 		t.Fatalf("retried start token = %q, want edited value (error: %v)", retried.StartToken, err)
 	}
 }
@@ -378,8 +380,8 @@ func TestServiceRetryFlowInstanceReusesPersistedCheckpointWithoutRerunningPrevio
 	if retried.Status != FlowStatusFinished {
 		t.Fatalf("retried flow status = %s, want finished", retried.Status)
 	}
-	payload, err := ParseTokenPayload(retried.StartToken)
-	if err != nil || TokenPayloadSetString(payload, "value") != "ignored-downstream-edit" {
+	payload, err := tokens.ParseTokenPayload(retried.StartToken)
+	if err != nil || tokens.TokenPayloadSetString(payload, "value") != "ignored-downstream-edit" {
 		t.Fatalf("retried checkpoint token = %q, want edited value (error: %v)", retried.StartToken, err)
 	}
 	if generationAttempts.Load() != 1 {
@@ -962,7 +964,7 @@ func TestServiceRetryRestartsFailedTriggeredFlow(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("register parent flow: %v", err)
 	}
-	startToken, err := BuildTokenPayload(map[string]any{"retry.request": map[string]any{"request": "original"}}, map[string]any{"admin.primary_set": "retry.request"})
+	startToken, err := tokens.BuildTokenPayload(map[string]any{"retry.request": map[string]any{"request": "original"}}, map[string]any{"admin.primary_set": "retry.request"})
 	if err != nil {
 		t.Fatalf("build start token: %v", err)
 	}
@@ -1024,7 +1026,7 @@ func TestServiceRetryRestartsFailedTriggeredFlow(t *testing.T) {
 
 func testEditablePayload(t *testing.T, value string) string {
 	t.Helper()
-	payload, err := BuildTokenPayload(map[string]any{"value": value}, map[string]any{"admin.primary_set": "value"})
+	payload, err := tokens.BuildTokenPayload(map[string]any{"value": value}, map[string]any{"admin.primary_set": "value"})
 	if err != nil {
 		t.Fatalf("build token payload: %v", err)
 	}
