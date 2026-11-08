@@ -33,6 +33,9 @@ type Flow struct {
 	Name        string
 	Label       string
 	Description string
+	// StartMiddlewares are included when this workflow is started. Sequence
+	// wrappers order them together with engine-level and per-call middleware.
+	StartMiddlewares []StartMiddleware
 	// RetryNodeNames declares persisted checkpoints from which a failed run may
 	// be restarted. The engine chooses the nearest declared node at or before
 	// the failed/current node and starts a fresh workflow instance there.

@@ -88,6 +88,7 @@ func (s *Service) RegisterFlow(flow Flow) error {
 		return fmt.Errorf("flow %q is already registered", name)
 	}
 	flow.Name = name
+	flow.StartMiddlewares = append([]StartMiddleware(nil), flow.StartMiddlewares...)
 	s.flows[name] = flow
 	return nil
 }
@@ -136,8 +137,9 @@ func (s *Service) RegisterTerminalHook(hook TerminalHook) {
 	s.mu.Unlock()
 }
 
-// RegisterStartMiddleware adds an engine-level middleware. Registered
-// middleware runs in registration order before StartOptions.Middlewares.
+// RegisterStartMiddleware adds an engine-level middleware with sequence 0.
+// Engine, flow-definition, and per-call middleware are sorted together by
+// sequence; ties retain source order.
 func (s *Service) RegisterStartMiddleware(middleware StartMiddleware) {
 	if s == nil || middleware == nil {
 		return
@@ -145,6 +147,12 @@ func (s *Service) RegisterStartMiddleware(middleware StartMiddleware) {
 	s.mu.Lock()
 	s.startMiddlewares = append(s.startMiddlewares, middleware)
 	s.mu.Unlock()
+}
+
+// RegisterStartMiddlewareAt registers engine-level middleware with an
+// explicit sequence number. Lower sequence values run first.
+func (s *Service) RegisterStartMiddlewareAt(sequence int, middleware StartMiddleware) {
+	s.RegisterStartMiddleware(NewSequencedStartMiddleware(sequence, middleware))
 }
 
 // IdempotencyMiddleware returns a start middleware that reuses an active flow
@@ -224,50 +232,48 @@ func (s *Service) StartFlow(ctx context.Context, name string, startToken string,
 	}
 	s.mu.RLock()
 	middlewares := append([]StartMiddleware(nil), s.startMiddlewares...)
+	if flow, ok := s.flows[strings.TrimSpace(name)]; ok {
+		middlewares = append(middlewares, flow.StartMiddlewares...)
+	}
 	s.mu.RUnlock()
 	middlewares = append(middlewares, startOptions.Middlewares...)
+	sort.SliceStable(middlewares, func(i, j int) bool {
+		return startMiddlewareSequence(middlewares[i]) < startMiddlewareSequence(middlewares[j])
+	})
 	if !hasIdempotencyMiddleware(middlewares, s) {
 		middlewares = append(middlewares, s.IdempotencyMiddleware())
 	}
 	request := StartRequest{FlowName: name, StartToken: startToken, Options: startOptions}
-	type enteredMiddleware struct {
-		middleware StartMiddleware
-		ctx        context.Context
-		request    StartRequest
-	}
-	var entered []enteredMiddleware
 	var invoke func(int, context.Context, StartRequest) (*FlowExecutionContext, error)
 	invoke = func(index int, ctx context.Context, request StartRequest) (*FlowExecutionContext, error) {
 		if index == len(middlewares) {
 			return s.startFlowCore(ctx, request)
 		}
-		entered = append(entered, enteredMiddleware{middleware: middlewares[index], ctx: ctx, request: request})
 		return middlewares[index].Start(ctx, request, func(nextCtx context.Context, nextRequest StartRequest) (*FlowExecutionContext, error) {
 			return invoke(index+1, nextCtx, nextRequest)
 		})
 	}
-	exec, startErr := invoke(0, ctx, request)
-	if startErr == nil {
-		return exec, nil
+	return invoke(0, ctx, request)
+}
+
+func startMiddlewareSequence(middleware StartMiddleware) int {
+	if sequenced, ok := middleware.(interface{ Sequence() int }); ok {
+		return sequenced.Sequence()
 	}
-	rollbackErrors := []error{startErr}
-	for i := len(entered) - 1; i >= 0; i-- {
-		rollback, ok := entered[i].middleware.(StartMiddlewareRollback)
-		if !ok {
-			continue
-		}
-		rollbackCtx := context.WithoutCancel(entered[i].ctx)
-		if err := rollback.RollbackStart(rollbackCtx, entered[i].request, startErr); err != nil {
-			rollbackErrors = append(rollbackErrors, fmt.Errorf("rollback start middleware %d: %w", i, err))
-		}
-	}
-	return nil, errors.Join(rollbackErrors...)
+	return 0
 }
 
 func hasIdempotencyMiddleware(middlewares []StartMiddleware, service *Service) bool {
 	for _, middleware := range middlewares {
-		if idempotency, ok := middleware.(idempotencyStartMiddleware); ok && idempotency.service == service {
-			return true
+		for middleware != nil {
+			if idempotency, ok := middleware.(idempotencyStartMiddleware); ok && idempotency.service == service {
+				return true
+			}
+			unwrapper, ok := middleware.(interface{ UnwrapStartMiddleware() StartMiddleware })
+			if !ok {
+				break
+			}
+			middleware = unwrapper.UnwrapStartMiddleware()
 		}
 	}
 	return false

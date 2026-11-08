@@ -2,66 +2,45 @@ package workflows
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
 	"github.com/wswag/go-flow/tokens"
 )
 
-type rollbackRecordingStartMiddleware struct {
-	name   string
-	events *[]string
-}
-
-func (m rollbackRecordingStartMiddleware) Start(ctx context.Context, request StartRequest, next StartFlowNext) (*FlowExecutionContext, error) {
-	return next(ctx, request)
-}
-
-func (m rollbackRecordingStartMiddleware) RollbackStart(_ context.Context, _ StartRequest, _ error) error {
-	*m.events = append(*m.events, m.name)
-	return nil
-}
-
-func TestStartMiddlewareRollbacksInReverseOrderOnStartError(t *testing.T) {
-	svc := NewService(nil)
-	events := []string{}
-	rootCause := errors.New("start failed")
-	svc.RegisterStartMiddleware(rollbackRecordingStartMiddleware{name: "outer", events: &events})
-	svc.RegisterStartMiddleware(rollbackRecordingStartMiddleware{name: "inner", events: &events})
-	svc.RegisterStartMiddleware(StartMiddlewareFunc(func(context.Context, StartRequest, StartFlowNext) (*FlowExecutionContext, error) {
-		return nil, rootCause
-	}))
-
-	_, err := svc.StartFlow(context.Background(), "flow", "token")
-	if !errors.Is(err, rootCause) {
-		t.Fatalf("start error = %v, want original error %v", err, rootCause)
-	}
-	if len(events) != 2 || events[0] != "inner" || events[1] != "outer" {
-		t.Fatalf("rollback order = %v, want [inner outer]", events)
-	}
-}
-
-func TestStartMiddlewareRollbackDoesNotRunForWorkflowExecutionError(t *testing.T) {
+func TestStartMiddlewaresUseSequenceAcrossEngineFlowAndCall(t *testing.T) {
 	svc := NewService(NewRepository(openFlowTestDB(t)))
 	if err := AutoMigrate(svc.store.db); err != nil {
 		t.Fatalf("auto migrate flow tables: %v", err)
 	}
-	events := []string{}
-	svc.RegisterStartMiddleware(rollbackRecordingStartMiddleware{name: "middleware", events: &events})
-	if err := svc.RegisterFlow(Flow{Name: "runtime-failure", Nodes: []FlowNode{{Name: "fail", Action: func(context.Context, string, Runtime) (string, error) {
-		return "", errors.New("workflow execution failed")
-	}}}}); err != nil {
+	var order []string
+	middleware := func(name string) StartMiddleware {
+		return StartMiddlewareFunc(func(ctx context.Context, request StartRequest, next StartFlowNext) (*FlowExecutionContext, error) {
+			order = append(order, name)
+			return next(ctx, request)
+		})
+	}
+	svc.RegisterStartMiddleware(NewSequencedStartMiddleware(30, middleware("engine")))
+	if err := svc.RegisterFlow(Flow{
+		Name: "sequenced-flow",
+		StartMiddlewares: []StartMiddleware{
+			NewSequencedStartMiddleware(20, middleware("flow")),
+		},
+		Nodes: []FlowNode{{Name: "run", Action: func(_ context.Context, input string, _ Runtime) (string, error) {
+			return input, nil
+		}}},
+	}); err != nil {
 		t.Fatalf("register flow: %v", err)
 	}
-
-	exec, err := svc.StartFlow(context.Background(), "runtime-failure", "token")
+	exec, err := svc.StartFlow(context.Background(), "sequenced-flow", "input", StartOptions{
+		Middlewares: []StartMiddleware{NewSequencedStartMiddleware(10, middleware("call"))},
+	})
 	if err != nil {
-		t.Fatalf("start workflow: %v", err)
+		t.Fatalf("start flow: %v", err)
 	}
 	waitForDone(t, exec.Done())
-	if len(events) != 0 {
-		t.Fatalf("rollback ran after workflow execution failure: %v", events)
+	if len(order) != 3 || order[0] != "call" || order[1] != "flow" || order[2] != "engine" {
+		t.Fatalf("middleware order = %v, want [call flow engine]", order)
 	}
 }
 
