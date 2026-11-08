@@ -58,6 +58,47 @@ if err != nil {
 parsed, err := tokens.ParseTokenPayload(payload)
 ```
 
+### Flow dependencies
+
+Register application dependencies on a flow definition with `UserInterfaces`.
+A node resolves a dependency by its interface or concrete type. Since Go does
+not support generic methods, use the generic package function
+`workflows.GetInterface[T](runtime)`:
+
+```go
+type Notifier interface {
+	Notify(context.Context, string) error
+}
+
+func registerNotificationFlow(engine *workflows.Service, notifier Notifier) error {
+	return engine.RegisterFlow(workflows.Flow{
+		Name:           "notify",
+		UserInterfaces: []any{notifier},
+		Nodes: []workflows.FlowNode{{
+			Name: "send",
+			Action: func(ctx context.Context, input string, runtime workflows.Runtime) (string, error) {
+				service, err := workflows.GetInterface[Notifier](runtime)
+				if err != nil {
+					return "", err
+				}
+				if err := service.Notify(ctx, input); err != nil {
+					return "", err
+				}
+				return input, nil
+			},
+		}},
+	})
+}
+```
+
+If no dependency matches the requested type, or multiple dependencies match,
+`GetInterface` returns an error. Registered dependency instances are shared by
+all executions of that flow. Action middleware can resolve dependencies from
+its `Runtime`; start middleware can resolve them from its `StartRequest`, for
+example `workflows.GetInterface[Notifier](request)`. When middleware redirects
+a start to another flow name, the next middleware sees that flow's registered
+dependencies.
+
 ### Fluent token access
 
 `TokenBuilder` and `TokenReader` provide a fluent API for creating, reading,

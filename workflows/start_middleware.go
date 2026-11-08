@@ -1,12 +1,22 @@
 package workflows
 
-import "context"
+import (
+	"context"
+	"reflect"
+)
 
 // StartRequest contains the mutable input to one StartFlow call.
 type StartRequest struct {
 	FlowName   string
 	StartToken string
 	Options    StartOptions
+	// UserInterfaces contains dependencies registered on the flow definition
+	// currently named by FlowName, for use by start middleware.
+	UserInterfaces []any
+}
+
+func (request StartRequest) resolveUserInterface(targetType reflect.Type) (any, error) {
+	return resolveUserInterfaceFrom(request.UserInterfaces, targetType)
 }
 
 // StartFlowNext continues the start middleware chain with a request. A

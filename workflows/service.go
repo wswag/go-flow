@@ -89,6 +89,7 @@ func (s *Service) RegisterFlow(flow Flow) error {
 	}
 	flow.Name = name
 	flow.StartMiddlewares = append([]StartMiddleware(nil), flow.StartMiddlewares...)
+	flow.UserInterfaces = append([]any(nil), flow.UserInterfaces...)
 	s.flows[name] = flow
 	return nil
 }
@@ -246,6 +247,7 @@ func (s *Service) StartFlow(ctx context.Context, name string, startToken string,
 	request := StartRequest{FlowName: name, StartToken: startToken, Options: startOptions}
 	var invoke func(int, context.Context, StartRequest) (*FlowExecutionContext, error)
 	invoke = func(index int, ctx context.Context, request StartRequest) (*FlowExecutionContext, error) {
+		request.UserInterfaces = s.flowUserInterfaces(request.FlowName)
 		if index == len(middlewares) {
 			return s.startFlowCore(ctx, request)
 		}
@@ -254,6 +256,16 @@ func (s *Service) StartFlow(ctx context.Context, name string, startToken string,
 		})
 	}
 	return invoke(0, ctx, request)
+}
+
+func (s *Service) flowUserInterfaces(flowName string) []any {
+	s.mu.RLock()
+	flow, ok := s.flows[strings.TrimSpace(flowName)]
+	s.mu.RUnlock()
+	if !ok {
+		return nil
+	}
+	return flow.UserInterfaces
 }
 
 func startMiddlewareSequence(middleware StartMiddleware) int {
@@ -1164,7 +1176,7 @@ func (s *Service) execute(exec *FlowExecutionContext) {
 		exec.StartToken = input
 
 		currentEvent := s.buildFlowEvent(instance, flow, &node, FlowStatusRunning, "", nil, false)
-		runtime := s.runtimeFor(exec.FlowInstanceID, node.ID, node.NodeIndex, flow.Name, currentEvent)
+		runtime := s.runtimeFor(exec.FlowInstanceID, node.ID, node.NodeIndex, flow.Name, flow.UserInterfaces, currentEvent)
 		action := flow.Nodes[node.NodeIndex].Action
 		s.mu.RLock()
 		actionMiddlewares := append([]ActionMiddleware(nil), s.actionMiddlewares...)
@@ -1308,13 +1320,14 @@ func (s *Service) DecodeFlowStartTokenMetaSet(ctx context.Context, flowInstanceI
 }
 
 // runtimeFor builds the per-node runtime supplied to an action.
-func (s *Service) runtimeFor(flowInstanceID uint, nodeID uint, nodeIndex int, flowName string, currentEvent FlowEvent) *executionRuntime {
+func (s *Service) runtimeFor(flowInstanceID uint, nodeID uint, nodeIndex int, flowName string, userInterfaces []any, currentEvent FlowEvent) *executionRuntime {
 	return &executionRuntime{
 		service:        s,
 		flowInstanceID: flowInstanceID,
 		nodeID:         nodeID,
 		nodeIndex:      nodeIndex,
 		flowName:       strings.TrimSpace(flowName),
+		userInterfaces: userInterfaces,
 		currentEvent:   currentEvent,
 	}
 }
@@ -2004,6 +2017,7 @@ type executionRuntime struct {
 	nodeID                uint
 	nodeIndex             int
 	flowName              string
+	userInterfaces        []any
 	currentEvent          FlowEvent
 	waitForTriggeredFlows bool
 	triggeredFlowCount    int
