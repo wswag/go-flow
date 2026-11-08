@@ -22,31 +22,27 @@ import (
 var ErrFlowNotRegistered = errors.New("flow is not registered")
 
 type Service struct {
-	mu               sync.RWMutex
-	store            *Repository
-	flows            map[string]Flow
-	active           map[uint]*FlowExecutionContext
-	activeKeys       map[string]*FlowExecutionContext
-	subscribers      map[chan FlowEvent]struct{}
-	failureHooks     []CorrelationFailureHook
-	terminalHooks    []TerminalHook
-	actionMiddleware func(Action) Action
+	mu                sync.RWMutex
+	store             *Repository
+	flows             map[string]Flow
+	active            map[uint]*FlowExecutionContext
+	activeKeys        map[string]*FlowExecutionContext
+	subscribers       map[chan FlowEvent]struct{}
+	failureHooks      []CorrelationFailureHook
+	terminalHooks     []TerminalHook
+	startMiddlewares  []StartMiddleware
+	actionMiddlewares []ActionMiddleware
 }
 
 // NewService baut den Workflow-Dienst über dem persistierten Repository.
 // `store` hält Token-, Flow- und Node-Zustände über Neustarts hinweg fest.
-func NewService(store *Repository, middleware ...func(Action) Action) *Service {
-	var actionMiddleware func(Action) Action
-	if len(middleware) > 0 {
-		actionMiddleware = middleware[0]
-	}
+func NewService(store *Repository) *Service {
 	return &Service{
-		store:            store,
-		actionMiddleware: actionMiddleware,
-		flows:            map[string]Flow{},
-		active:           map[uint]*FlowExecutionContext{},
-		activeKeys:       map[string]*FlowExecutionContext{},
-		subscribers:      map[chan FlowEvent]struct{}{},
+		store:       store,
+		flows:       map[string]Flow{},
+		active:      map[uint]*FlowExecutionContext{},
+		activeKeys:  map[string]*FlowExecutionContext{},
+		subscribers: map[chan FlowEvent]struct{}{},
 	}
 }
 
@@ -139,10 +135,37 @@ func (s *Service) RegisterTerminalHook(hook TerminalHook) {
 	s.mu.Unlock()
 }
 
+// RegisterStartMiddleware adds an engine-level middleware. Registered
+// middleware runs in registration order before StartOptions.Middlewares.
+func (s *Service) RegisterStartMiddleware(middleware StartMiddleware) {
+	if s == nil || middleware == nil {
+		return
+	}
+	s.mu.Lock()
+	s.startMiddlewares = append(s.startMiddlewares, middleware)
+	s.mu.Unlock()
+}
+
+// RegisterActionMiddleware adds an engine-level action middleware. Registered
+// middleware wraps actions in registration order, with the first registered
+// middleware as the outermost wrapper.
+func (s *Service) RegisterActionMiddleware(middleware ActionMiddleware) {
+	if s == nil || middleware == nil {
+		return
+	}
+	s.mu.Lock()
+	s.actionMiddlewares = append(s.actionMiddlewares, middleware)
+	s.mu.Unlock()
+}
+
 // StartFlow startet einen neuen Workflow und lässt ihn im Hintergrund weiterlaufen.
-// The optional StartOptions supplies metadata, idempotency, parent links, and
-// triggered-flow tracking. At most one options value may be provided.
+// The optional StartOptions supplies metadata, idempotency, parent links,
+// triggered-flow tracking, and per-call middleware. At most one options value
+// may be provided.
 func (s *Service) StartFlow(ctx context.Context, name string, startToken string, options ...StartOptions) (*FlowExecutionContext, error) {
+	if s == nil {
+		return nil, errors.New("flow service is not configured")
+	}
 	if len(options) > 1 {
 		return nil, errors.New("StartFlow accepts at most one StartOptions value")
 	}
@@ -150,6 +173,28 @@ func (s *Service) StartFlow(ctx context.Context, name string, startToken string,
 	if len(options) == 1 {
 		startOptions = options[0]
 	}
+	s.mu.RLock()
+	middlewares := append([]StartMiddleware(nil), s.startMiddlewares...)
+	s.mu.RUnlock()
+	middlewares = append(middlewares, startOptions.Middlewares...)
+	request := StartRequest{FlowName: name, StartToken: startToken, Options: startOptions}
+	var invoke func(int, context.Context, StartRequest) (*FlowExecutionContext, error)
+	invoke = func(index int, ctx context.Context, request StartRequest) (*FlowExecutionContext, error) {
+		if index == len(middlewares) {
+			return s.startFlowCore(ctx, request)
+		}
+		return middlewares[index].Start(ctx, request, func(nextCtx context.Context, nextRequest StartRequest) (*FlowExecutionContext, error) {
+			return invoke(index+1, nextCtx, nextRequest)
+		})
+	}
+	return invoke(0, ctx, request)
+}
+
+func (s *Service) startFlowCore(ctx context.Context, request StartRequest) (*FlowExecutionContext, error) {
+	name := request.FlowName
+	startToken := request.StartToken
+	startOptions := request.Options
+	startOptions.Middlewares = nil
 	exec, err := s.startFlowAtNode(
 		ctx, name, startToken, 0, startOptions, true,
 	)
@@ -253,13 +298,14 @@ func (s *Service) startFlowAtNode(ctx context.Context, name string, startToken s
 	}
 
 	exec := &FlowExecutionContext{
-		FlowName:       flow.Name,
-		FlowInstanceID: instanceID,
-		Status:         FlowStatusRunning,
-		StartToken:     strings.TrimSpace(startToken),
-		MetadataJSON:   metadataJSON,
-		IdempotencyKey: idempotencyKey,
-		done:           make(chan struct{}),
+		FlowName:          flow.Name,
+		FlowInstanceID:    instanceID,
+		Status:            FlowStatusRunning,
+		StartToken:        strings.TrimSpace(startToken),
+		MetadataJSON:      metadataJSON,
+		IdempotencyKey:    idempotencyKey,
+		done:              make(chan struct{}),
+		actionMiddlewares: append([]ActionMiddleware(nil), options.ActionMiddlewares...),
 	}
 	s.active[instanceID] = exec
 	if idempotencyKey != "" {
@@ -1054,14 +1100,18 @@ func (s *Service) execute(exec *FlowExecutionContext) {
 		currentEvent := s.buildFlowEvent(instance, flow, &node, FlowStatusRunning, "", nil, false)
 		runtime := s.runtimeFor(exec.FlowInstanceID, node.ID, node.NodeIndex, flow.Name, currentEvent)
 		action := flow.Nodes[node.NodeIndex].Action
-		if s.actionMiddleware != nil {
-			action = s.actionMiddleware(action)
+		s.mu.RLock()
+		actionMiddlewares := append([]ActionMiddleware(nil), s.actionMiddlewares...)
+		s.mu.RUnlock()
+		actionMiddlewares = append(actionMiddlewares, exec.actionMiddlewares...)
+		for index := len(actionMiddlewares) - 1; index >= 0; index-- {
+			action = actionMiddlewares[index].Wrap(action)
 		}
 		// Middleware wraps the action at the engine boundary; its result is
 		// persisted below before the next node is allowed to run.
 		output, actionErr := action(nodeCtx, input, runtime)
 		if actionErr != nil {
-			if s.actionMiddleware == nil {
+			if len(actionMiddlewares) == 0 {
 				output = ""
 			}
 			if updateErr := s.markExecutionFailed(ctx, instance.ID, node.ID, actionErr, output); updateErr != nil {

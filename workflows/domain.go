@@ -86,7 +86,8 @@ type FlowExecutionContext struct {
 	Reused           bool
 	Error            error
 
-	done chan struct{}
+	done              chan struct{}
+	actionMiddlewares []ActionMiddleware
 }
 
 // StartOptions describes optional behavior for StartFlow. TargetFlowName
@@ -103,6 +104,14 @@ type StartOptions struct {
 	// TargetFlowName asks StartFlow to return a handle that follows this
 	// triggered child of the started flow.
 	TargetFlowName string
+	// Middlewares adds middleware for this StartFlow call after engine-level
+	// middleware. The chain is fixed when StartFlow is called; changes to this
+	// slice from within a middleware do not alter the active chain.
+	Middlewares []StartMiddleware
+	// ActionMiddlewares wraps each node action in this execution after
+	// engine-level action middleware. These functions are process-local and are
+	// not persisted for a later resume.
+	ActionMiddlewares []ActionMiddleware
 }
 
 // CorrelationFailureEvent beschreibt den terminalen Fehler eines Laufs innerhalb

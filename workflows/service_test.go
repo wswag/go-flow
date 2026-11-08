@@ -694,7 +694,7 @@ func TestServicePersistSystemFollowUpIsIdempotentPerTriggerPosition(t *testing.T
 	}
 
 	for attempt := 0; attempt < 2; attempt++ {
-		if err := svc.persistSystemChild(ctx, parent.ID, node.ID, node.NodeIndex, 0, "child", "same-input", nil); err != nil {
+		if err := svc.persistSystemChild(ctx, parent.ID, node.ID, node.NodeIndex, 0, "child", "same-input"); err != nil {
 			t.Fatalf("persist identical follow-up on attempt %d: %v", attempt+1, err)
 		}
 	}
@@ -705,7 +705,7 @@ func TestServicePersistSystemFollowUpIsIdempotentPerTriggerPosition(t *testing.T
 	if len(children) != 1 {
 		t.Fatalf("expected one idempotent system node, got %d", len(children))
 	}
-	if err := svc.persistSystemChild(ctx, parent.ID, node.ID, node.NodeIndex, 0, "other-child", "same-input", nil); err == nil {
+	if err := svc.persistSystemChild(ctx, parent.ID, node.ID, node.NodeIndex, 0, "other-child", "same-input"); err == nil {
 		t.Fatal("expected conflicting replay at the same trigger position to fail")
 	}
 }
@@ -733,10 +733,10 @@ func TestServicePersistSystemChildAllowsFirstChildOfLaterParentNode(t *testing.T
 	if err := repo.CreateNodeInstance(ctx, second); err != nil {
 		t.Fatalf("create second parent node: %v", err)
 	}
-	if err := svc.persistSystemChild(ctx, parent.ID, first.ID, first.NodeIndex, 0, "first-child", "first", nil); err != nil {
+	if err := svc.persistSystemChild(ctx, parent.ID, first.ID, first.NodeIndex, 0, "first-child", "first"); err != nil {
 		t.Fatalf("persist first child: %v", err)
 	}
-	if err := svc.persistSystemChild(ctx, parent.ID, second.ID, second.NodeIndex, 0, "second-child", "second", nil); err != nil {
+	if err := svc.persistSystemChild(ctx, parent.ID, second.ID, second.NodeIndex, 0, "second-child", "second"); err != nil {
 		t.Fatalf("persist first child of later parent node: %v", err)
 	}
 	instance, err := repo.FindFlowInstanceByID(ctx, parent.ID)
