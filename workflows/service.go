@@ -139,76 +139,33 @@ func (s *Service) RegisterTerminalHook(hook TerminalHook) {
 	s.mu.Unlock()
 }
 
-// RunFlow startet einen Workflow asynchron mit einem frischen Start-Token.
-// `startToken` ist der persistierte Input für den ersten Knoten.
-func (s *Service) RunFlow(name string, startToken string) *FlowExecutionContext {
-	exec, err := s.StartFlow(context.Background(), name, startToken)
-	if err != nil {
-		return &FlowExecutionContext{
-			FlowName: name,
-			Status:   FlowStatusFailed,
-			Error:    err,
-			done:     closedDoneChannel(),
-		}
-	}
-	return exec
-}
-
 // StartFlow startet einen neuen Workflow und lässt ihn im Hintergrund weiterlaufen.
-// Die Rückgabe enthält die Persistenz-ID und kann über Done() beobachtet werden.
-func (s *Service) StartFlow(ctx context.Context, name string, startToken string) (*FlowExecutionContext, error) {
-	return s.StartFlowWithOptions(ctx, name, startToken, StartOptions{})
-}
-
-// StartFlowWithMetadata startet einen neuen Workflow und speichert optionale Metadaten.
-// Die Metadaten dienen der späteren Admin- und UI-Ansicht.
-func (s *Service) StartFlowWithMetadata(ctx context.Context, name string, startToken string, metadata map[string]any) (*FlowExecutionContext, error) {
-	return s.StartFlowWithOptions(ctx, name, startToken, StartOptions{Metadata: metadata})
-}
-
-// StartFlowWithOptions startet einen neuen Workflow und berücksichtigt optionale Metadaten und Idempotenz.
-func (s *Service) StartFlowWithOptions(ctx context.Context, name string, startToken string, options StartOptions) (*FlowExecutionContext, error) {
-	return s.StartFlowLinkedWithOptions(ctx, name, startToken, nil, nil, options)
-}
-
-// StartFlowChainWithMetadata startet einen vorgeschalteten Entry-Flow und reicht
-// den Ausführungsstatus bis zum eigentlichen Ziel-Flow weiter.
-func (s *Service) StartFlowChainWithMetadata(ctx context.Context, entryFlowName string, targetFlowName string, startToken string, metadata map[string]any) (*FlowExecutionContext, error) {
-	return s.StartFlowChainWithOptions(ctx, entryFlowName, targetFlowName, startToken, StartOptions{Metadata: metadata})
-}
-
-// StartFlowChainWithOptions startet einen Entry-Flow mit optionaler Idempotenz und reicht dessen Kindlauf nach außen durch.
-func (s *Service) StartFlowChainWithOptions(ctx context.Context, entryFlowName string, targetFlowName string, startToken string, options StartOptions) (*FlowExecutionContext, error) {
-	entryExec, err := s.StartFlowWithOptions(ctx, entryFlowName, startToken, options)
+// The optional StartOptions supplies metadata, idempotency, parent links, and
+// triggered-flow tracking. At most one options value may be provided.
+func (s *Service) StartFlow(ctx context.Context, name string, startToken string, options ...StartOptions) (*FlowExecutionContext, error) {
+	if len(options) > 1 {
+		return nil, errors.New("StartFlow accepts at most one StartOptions value")
+	}
+	var startOptions StartOptions
+	if len(options) == 1 {
+		startOptions = options[0]
+	}
+	exec, err := s.startFlowAtNode(
+		ctx, name, startToken, 0, startOptions, true,
+	)
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(targetFlowName) == "" || strings.TrimSpace(entryFlowName) == strings.TrimSpace(targetFlowName) {
-		return entryExec, nil
+	targetFlowName := strings.TrimSpace(startOptions.TargetFlowName)
+	if targetFlowName == "" || targetFlowName == strings.TrimSpace(name) {
+		return exec, nil
 	}
-	return s.wrapTriggeredFlowExecution(context.WithoutCancel(ctx), entryExec, targetFlowName), nil
+	return s.wrapTriggeredFlowExecution(context.WithoutCancel(ctx), exec, targetFlowName), nil
 }
 
-// StartFlowLinked startet einen neuen Workflow und verknüpft ihn optional mit einem System-Knoten.
-// Der Link wird zur späteren Abschlussverfolgung in der Persistenz gespeichert.
-func (s *Service) StartFlowLinked(ctx context.Context, name string, startToken string, parentSystemNodeID *uint, callerEndTokenID *uint) (*FlowExecutionContext, error) {
-	return s.StartFlowLinkedWithOptions(ctx, name, startToken, parentSystemNodeID, callerEndTokenID, StartOptions{})
-}
-
-// StartFlowLinkedWithMetadata startet einen neuen Workflow und verknüpft ihn optional mit einem System-Knoten.
-// Zusätzlich können Metadaten gespeichert werden, damit die UI den Ursprung des Flows zeigt.
-func (s *Service) StartFlowLinkedWithMetadata(ctx context.Context, name string, startToken string, parentSystemNodeID *uint, callerEndTokenID *uint, metadata map[string]any) (*FlowExecutionContext, error) {
-	return s.StartFlowLinkedWithOptions(ctx, name, startToken, parentSystemNodeID, callerEndTokenID, StartOptions{Metadata: metadata})
-}
-
-// StartFlowLinkedWithOptions startet einen neuen Workflow mit optionalen Metadaten und fachlichem Idempotency-Key.
-func (s *Service) StartFlowLinkedWithOptions(ctx context.Context, name string, startToken string, parentSystemNodeID *uint, callerEndTokenID *uint, options StartOptions) (*FlowExecutionContext, error) {
-	return s.startFlowLinkedWithOptionsAtNode(ctx, name, startToken, 0, parentSystemNodeID, callerEndTokenID, options, true)
-}
-
-// startFlowLinkedWithOptionsAtNode validates, persists, and optionally launches
-// a flow at a selected node with its parent links and start options.
-func (s *Service) startFlowLinkedWithOptionsAtNode(ctx context.Context, name string, startToken string, startNodeIndex int, parentSystemNodeID *uint, callerEndTokenID *uint, options StartOptions, launch bool) (*FlowExecutionContext, error) {
+// startFlowAtNode validates, persists, and optionally launches a flow at a
+// selected node with its start options.
+func (s *Service) startFlowAtNode(ctx context.Context, name string, startToken string, startNodeIndex int, options StartOptions, launch bool) (*FlowExecutionContext, error) {
 	if s == nil || s.store == nil {
 		return nil, errors.New("flow store is not configured")
 	}
@@ -266,8 +223,7 @@ func (s *Service) startFlowLinkedWithOptionsAtNode(ctx context.Context, name str
 			IdempotencyKey:     idempotencyKey,
 			CurrentNodeIndex:   startNodeIndex,
 			InputTokenID:       &startTokenRecord.ID,
-			CallerEndTokenID:   callerEndTokenID,
-			ParentSystemNodeID: parentSystemNodeID,
+			ParentSystemNodeID: options.ParentSystemNodeID,
 			MetadataJSON:       metadataJSON,
 			StartedAt:          now,
 			UpdatedAt:          now,
@@ -297,14 +253,13 @@ func (s *Service) startFlowLinkedWithOptionsAtNode(ctx context.Context, name str
 	}
 
 	exec := &FlowExecutionContext{
-		FlowName:         flow.Name,
-		FlowInstanceID:   instanceID,
-		Status:           FlowStatusRunning,
-		StartToken:       strings.TrimSpace(startToken),
-		CallerEndTokenID: callerEndTokenID,
-		MetadataJSON:     metadataJSON,
-		IdempotencyKey:   idempotencyKey,
-		done:             make(chan struct{}),
+		FlowName:       flow.Name,
+		FlowInstanceID: instanceID,
+		Status:         FlowStatusRunning,
+		StartToken:     strings.TrimSpace(startToken),
+		MetadataJSON:   metadataJSON,
+		IdempotencyKey: idempotencyKey,
+		done:           make(chan struct{}),
 	}
 	s.active[instanceID] = exec
 	if idempotencyKey != "" {
@@ -573,7 +528,7 @@ func (s *Service) RetryFlowInstance(ctx context.Context, flowInstanceID uint, no
 	freshMetadata["retryOfFlowInstanceId"] = instance.ID
 	freshMetadata = EnsureCorrelationMetadata(freshMetadata, metadata.CorrelationLabel, metadata.CorrelationDescription)
 
-	started, err := s.startFlowLinkedWithOptionsAtNode(ctx, instance.Name, startToken, startNodeIndex, nil, instance.CallerEndTokenID, StartOptions{Metadata: freshMetadata}, false)
+	started, err := s.startFlowAtNode(ctx, instance.Name, startToken, startNodeIndex, StartOptions{Metadata: freshMetadata}, false)
 	if err != nil {
 		return nil, err
 	}
@@ -684,8 +639,6 @@ func copyFlowExecutionState(dst *FlowExecutionContext, src *FlowExecutionContext
 	dst.CurrentNodeName = src.CurrentNodeName
 	dst.StartToken = src.StartToken
 	dst.EndToken = src.EndToken
-	dst.CallerEndTokenID = src.CallerEndTokenID
-	dst.CallerEndToken = src.CallerEndToken
 	dst.MetadataJSON = src.MetadataJSON
 	dst.IdempotencyKey = src.IdempotencyKey
 	dst.Reused = src.Reused
@@ -988,7 +941,6 @@ func (s *Service) executionFromInstance(instance FlowInstance) *FlowExecutionCon
 		FlowInstanceID:   instance.ID,
 		Status:           instance.Status,
 		CurrentNodeIndex: instance.CurrentNodeIndex,
-		CallerEndTokenID: instance.CallerEndTokenID,
 		MetadataJSON:     strings.TrimSpace(instance.MetadataJSON),
 		IdempotencyKey:   strings.TrimSpace(instance.IdempotencyKey),
 		done:             closedDoneChannel(),
@@ -998,9 +950,6 @@ func (s *Service) executionFromInstance(instance FlowInstance) *FlowExecutionCon
 	}
 	if instance.OutputToken != nil {
 		exec.EndToken = instance.OutputToken.RawData
-	}
-	if instance.CallerEndToken != nil {
-		exec.CallerEndToken = strings.TrimSpace(instance.CallerEndToken.RawData)
 	}
 	if strings.TrimSpace(instance.ErrorMessage) != "" {
 		exec.Error = errors.New(strings.TrimSpace(instance.ErrorMessage))
@@ -1051,12 +1000,6 @@ func (s *Service) execute(exec *FlowExecutionContext) {
 		if err != nil {
 			s.failExecution(exec, err)
 			return
-		}
-		exec.CallerEndTokenID = instance.CallerEndTokenID
-		if instance.CallerEndToken != nil {
-			exec.CallerEndToken = strings.TrimSpace(instance.CallerEndToken.RawData)
-		} else {
-			exec.CallerEndToken = ""
 		}
 		// Terminal states publish once and synchronize any parent system node.
 		if instance.Status == FlowStatusFinished {
@@ -1109,7 +1052,7 @@ func (s *Service) execute(exec *FlowExecutionContext) {
 		exec.StartToken = input
 
 		currentEvent := s.buildFlowEvent(instance, flow, &node, FlowStatusRunning, "", nil, false)
-		runtime := s.runtimeFor(exec.FlowInstanceID, node.ID, node.NodeIndex, flow.Name, exec.CallerEndToken, exec.CallerEndTokenID, currentEvent)
+		runtime := s.runtimeFor(exec.FlowInstanceID, node.ID, node.NodeIndex, flow.Name, currentEvent)
 		action := flow.Nodes[node.NodeIndex].Action
 		if s.actionMiddleware != nil {
 			action = s.actionMiddleware(action)
@@ -1211,16 +1154,14 @@ func (s *Service) broadcastTerminal(ctx context.Context, event FlowEvent) {
 }
 
 // runtimeFor builds the per-node runtime supplied to an action.
-func (s *Service) runtimeFor(flowInstanceID uint, nodeID uint, nodeIndex int, flowName string, callerEndToken string, callerEndTokenID *uint, currentEvent FlowEvent) *executionRuntime {
+func (s *Service) runtimeFor(flowInstanceID uint, nodeID uint, nodeIndex int, flowName string, currentEvent FlowEvent) *executionRuntime {
 	return &executionRuntime{
-		service:          s,
-		flowInstanceID:   flowInstanceID,
-		nodeID:           nodeID,
-		nodeIndex:        nodeIndex,
-		flowName:         strings.TrimSpace(flowName),
-		callerEndToken:   strings.TrimSpace(callerEndToken),
-		callerEndTokenID: callerEndTokenID,
-		currentEvent:     currentEvent,
+		service:        s,
+		flowInstanceID: flowInstanceID,
+		nodeID:         nodeID,
+		nodeIndex:      nodeIndex,
+		flowName:       strings.TrimSpace(flowName),
+		currentEvent:   currentEvent,
 	}
 }
 
@@ -1909,19 +1850,18 @@ type executionRuntime struct {
 	nodeID                uint
 	nodeIndex             int
 	flowName              string
-	callerEndToken        string
-	callerEndTokenID      *uint
 	currentEvent          FlowEvent
 	waitForTriggeredFlows bool
 	triggeredFlowCount    int
 }
 
-// CallerEndToken returns the token supplied by the parent system node.
-func (r *executionRuntime) CallerEndToken() string {
+// NewTokenBuilder creates a workflow token builder tagged with the current
+// flow and node names.
+func (r *executionRuntime) NewTokenBuilder(state any) *tokens.TokenBuilder {
 	if r == nil {
-		return ""
+		return nil
 	}
-	return r.callerEndToken
+	return NewFlowTokenBuilder(r.flowName, r.currentEvent.CurrentNodeName, state)
 }
 
 // CurrentEvent returns the status snapshot for the node executing this runtime.
@@ -1944,7 +1884,7 @@ func (r *executionRuntime) TriggerFlow(ctx context.Context, name string, startTo
 	}
 	triggerIndex := r.triggeredFlowCount
 	r.triggeredFlowCount++
-	return r.service.persistSystemChild(ctx, r.flowInstanceID, r.nodeID, r.nodeIndex, triggerIndex, name, strings.TrimSpace(startToken), r.callerEndTokenID)
+	return r.service.persistSystemChild(ctx, r.flowInstanceID, r.nodeID, r.nodeIndex, triggerIndex, name, strings.TrimSpace(startToken))
 }
 
 // WaitForTriggeredFlows hält den aktuellen Flow nach diesem Node an, bis alle
@@ -2047,7 +1987,7 @@ func completedSystemNodeOutputs(nodes []NodeInstance) ([]string, bool) {
 
 // persistSystemChild creates or reuses the system-node record representing a
 // child-flow request, making dispatch safe to retry after restart.
-func (s *Service) persistSystemChild(ctx context.Context, flowInstanceID uint, nodeID uint, nodeIndex int, triggerIndex int, flowName string, startToken string, callerEndTokenID *uint) error {
+func (s *Service) persistSystemChild(ctx context.Context, flowInstanceID uint, nodeID uint, nodeIndex int, triggerIndex int, flowName string, startToken string) error {
 	if flowInstanceID == 0 || nodeID == 0 {
 		return errors.New("flow runtime is not configured")
 	}
@@ -2086,8 +2026,7 @@ func (s *Service) persistSystemChild(ctx context.Context, flowInstanceID uint, n
 		})
 		if triggerIndex < len(existingChildren) {
 			existing := existingChildren[triggerIndex]
-			if existing.SystemFlowName != flowName ||
-				!sameOptionalUint(existing.CallerEndTokenID, callerEndTokenID) || existing.InputToken == nil || existing.InputToken.RawData != startToken {
+			if existing.SystemFlowName != flowName || existing.InputToken == nil || existing.InputToken.RawData != startToken {
 				return fmt.Errorf("triggered flow %d of node %d conflicts with its persisted checkpoint", triggerIndex, current.ID)
 			}
 			return nil
@@ -2122,7 +2061,6 @@ func (s *Service) persistSystemChild(ctx context.Context, flowInstanceID uint, n
 			Status:                 NodeStatusQueued,
 			SystemNode:             true,
 			SystemFlowName:         flowName,
-			CallerEndTokenID:       callerEndTokenID,
 			InputTokenID:           &token.ID,
 			MetadataJSON:           nodeMetadataJSON,
 			PreviousNodeInstanceID: &current.ID,
@@ -2135,14 +2073,6 @@ func (s *Service) persistSystemChild(ctx context.Context, flowInstanceID uint, n
 		return err
 	}
 	return nil
-}
-
-// sameOptionalUint compares optional IDs, including nil values.
-func sameOptionalUint(left *uint, right *uint) bool {
-	if left == nil || right == nil {
-		return left == nil && right == nil
-	}
-	return *left == *right
 }
 
 // nextSystemNodeIndex returns the next available index among a flow's system
@@ -2191,12 +2121,6 @@ func (s *Service) dispatchSystemNode(ctx context.Context, node NodeInstance) (*F
 	startToken := ""
 	if node.InputToken != nil {
 		startToken = node.InputToken.RawData
-	}
-	var callerEndTokenID *uint
-	if node.CallerEndTokenID != nil {
-		callerEndTokenID = node.CallerEndTokenID
-	} else if node.FlowInstance != nil {
-		callerEndTokenID = node.FlowInstance.CallerEndTokenID
 	}
 	now := time.Now().UTC()
 	var fresh NodeInstance
@@ -2291,7 +2215,7 @@ func (s *Service) dispatchSystemNode(ctx context.Context, node NodeInstance) (*F
 		parentMetadata = parseFlowMetadata(node.FlowInstance.MetadataJSON).Raw
 	}
 	childMetadata := InheritCorrelationMetadata(parentMetadata, node.FlowInstanceID, node.ID, node.NodeIndex)
-	started, err := s.StartFlowLinkedWithMetadata(ctx, node.SystemFlowName, startToken, &node.ID, callerEndTokenID, childMetadata)
+	started, err := s.StartFlow(ctx, node.SystemFlowName, startToken, StartOptions{ParentSystemNodeID: &node.ID, Metadata: childMetadata})
 	if err != nil {
 		// Eine parallele Instanz kann den durch parent_system_node_id eindeutig
 		// geschützten Kindlauf zwischen unserer Prüfung und dem Create angelegt

@@ -51,7 +51,9 @@ type FlowNode struct {
 // Runtime beschreibt die Fähigkeiten, die ein Node während seiner Ausführung
 // für Folge-Workflows nutzen darf.
 type Runtime interface {
-	CallerEndToken() string
+	// NewTokenBuilder creates a workflow token builder tagged with the current
+	// flow and node names. A non-nil state is stored as flow.state_set.
+	NewTokenBuilder(state any) *tokens.TokenBuilder
 	CurrentEvent() FlowEvent
 	TriggerFlow(ctx context.Context, name string, startToken string) error
 	WaitForTriggeredFlows(ctx context.Context) error
@@ -79,8 +81,6 @@ type FlowExecutionContext struct {
 	CurrentNodeName  string
 	StartToken       string
 	EndToken         string
-	CallerEndTokenID *uint
-	CallerEndToken   string
 	MetadataJSON     string
 	IdempotencyKey   string
 	Reused           bool
@@ -89,10 +89,20 @@ type FlowExecutionContext struct {
 	done chan struct{}
 }
 
-// StartOptions beschreibt optionale Startparameter für neue Workflow-Läufe.
+// StartOptions describes optional behavior for StartFlow. TargetFlowName
+// makes StartFlow start a wrapper flow and return an execution handle that
+// follows the matching triggered child flow.
 type StartOptions struct {
-	Metadata       map[string]any
+	// Metadata is persisted with the flow instance and its initial node.
+	Metadata map[string]any
+	// IdempotencyKey reuses an active execution with the same flow name and key.
 	IdempotencyKey string
+
+	// ParentSystemNodeID links a child flow to the system node that dispatched it.
+	ParentSystemNodeID *uint
+	// TargetFlowName asks StartFlow to return a handle that follows this
+	// triggered child of the started flow.
+	TargetFlowName string
 }
 
 // CorrelationFailureEvent beschreibt den terminalen Fehler eines Laufs innerhalb
@@ -189,7 +199,6 @@ type FlowInstance struct {
 	CurrentNodeIndex   int        `gorm:"index"`
 	InputTokenID       *uint      `gorm:"index"`
 	OutputTokenID      *uint      `gorm:"index"`
-	CallerEndTokenID   *uint      `gorm:"index"`
 	ParentSystemNodeID *uint      `gorm:"uniqueIndex:ux_flow_instances_parent_system_node"`
 	MetadataJSON       string     `gorm:"type:text"`
 	ErrorMessage       string     `gorm:"type:text"`
@@ -200,7 +209,6 @@ type FlowInstance struct {
 	FinishedAt         *time.Time     `gorm:"index"`
 	InputToken         *Token         `gorm:"foreignKey:InputTokenID"`
 	OutputToken        *Token         `gorm:"foreignKey:OutputTokenID"`
-	CallerEndToken     *Token         `gorm:"foreignKey:CallerEndTokenID"`
 	NodeInstances      []NodeInstance `gorm:"foreignKey:FlowInstanceID"`
 }
 
@@ -214,7 +222,6 @@ type NodeInstance struct {
 	SystemNode             bool       `gorm:"index"`
 	SystemFlowName         string     `gorm:"index"`
 	SystemFlowInstanceID   *uint      `gorm:"index"`
-	CallerEndTokenID       *uint      `gorm:"index"`
 	InputTokenID           *uint      `gorm:"index"`
 	OutputTokenID          *uint      `gorm:"index"`
 	MetadataJSON           string     `gorm:"type:text"`
@@ -229,7 +236,6 @@ type NodeInstance struct {
 
 	InputToken           *Token        `gorm:"foreignKey:InputTokenID"`
 	OutputToken          *Token        `gorm:"foreignKey:OutputTokenID"`
-	CallerEndToken       *Token        `gorm:"foreignKey:CallerEndTokenID"`
 	PreviousNodeInstance *NodeInstance `gorm:"foreignKey:PreviousNodeInstanceID"`
 	NextNodeInstance     *NodeInstance `gorm:"foreignKey:NextNodeInstanceID"`
 	FlowInstance         *FlowInstance `gorm:"foreignKey:FlowInstanceID"`
