@@ -242,6 +242,7 @@ func TestServiceStartFlowDoesNotReuseFailedIdempotentFlow(t *testing.T) {
 	}
 	repo := NewRepository(db)
 	svc := NewService(repo)
+	svc.RegisterStartMiddleware(svc.IdempotencyMiddleware())
 	if err := svc.RegisterFlow(Flow{
 		Name: "failed-idempotent-flow",
 		Nodes: []FlowNode{{Name: "fail", Action: func(context.Context, string, Runtime) (string, error) {

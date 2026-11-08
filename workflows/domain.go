@@ -97,7 +97,9 @@ type FlowExecutionContext struct {
 type StartOptions struct {
 	// Metadata is persisted with the flow instance and its initial node.
 	Metadata map[string]any
-	// IdempotencyKey reuses an active execution with the same flow name and key.
+	// IdempotencyKey is used by Service.IdempotencyMiddleware to find and reuse
+	// an active execution with the same flow name and key. StartFlow adds this
+	// middleware at the end of the chain unless it is already present.
 	IdempotencyKey string
 
 	// ParentSystemNodeID links a child flow to the system node that dispatched it.
