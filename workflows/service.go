@@ -230,16 +230,38 @@ func (s *Service) StartFlow(ctx context.Context, name string, startToken string,
 		middlewares = append(middlewares, s.IdempotencyMiddleware())
 	}
 	request := StartRequest{FlowName: name, StartToken: startToken, Options: startOptions}
+	type enteredMiddleware struct {
+		middleware StartMiddleware
+		ctx        context.Context
+		request    StartRequest
+	}
+	var entered []enteredMiddleware
 	var invoke func(int, context.Context, StartRequest) (*FlowExecutionContext, error)
 	invoke = func(index int, ctx context.Context, request StartRequest) (*FlowExecutionContext, error) {
 		if index == len(middlewares) {
 			return s.startFlowCore(ctx, request)
 		}
+		entered = append(entered, enteredMiddleware{middleware: middlewares[index], ctx: ctx, request: request})
 		return middlewares[index].Start(ctx, request, func(nextCtx context.Context, nextRequest StartRequest) (*FlowExecutionContext, error) {
 			return invoke(index+1, nextCtx, nextRequest)
 		})
 	}
-	return invoke(0, ctx, request)
+	exec, startErr := invoke(0, ctx, request)
+	if startErr == nil {
+		return exec, nil
+	}
+	rollbackErrors := []error{startErr}
+	for i := len(entered) - 1; i >= 0; i-- {
+		rollback, ok := entered[i].middleware.(StartMiddlewareRollback)
+		if !ok {
+			continue
+		}
+		rollbackCtx := context.WithoutCancel(entered[i].ctx)
+		if err := rollback.RollbackStart(rollbackCtx, entered[i].request, startErr); err != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("rollback start middleware %d: %w", i, err))
+		}
+	}
+	return nil, errors.Join(rollbackErrors...)
 }
 
 func hasIdempotencyMiddleware(middlewares []StartMiddleware, service *Service) bool {
