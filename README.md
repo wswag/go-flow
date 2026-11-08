@@ -97,7 +97,9 @@ all executions of that flow. Action middleware can resolve dependencies from
 its `Runtime`; start middleware can resolve them from its `StartRequest`, for
 example `workflows.GetInterface[Notifier](request)`. When middleware redirects
 a start to another flow name, the next middleware sees that flow's registered
-dependencies.
+dependencies. A caller can pass `StartOptions{UserInterfaces: []any{...}}` to
+override matching flow-level dependencies for that start; lookup falls back to
+the flow definition for types not supplied by the caller.
 
 ### Fluent token access
 

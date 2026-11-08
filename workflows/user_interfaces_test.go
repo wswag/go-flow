@@ -108,3 +108,51 @@ func TestStartMiddlewareCanResolveFlowUserInterface(t *testing.T) {
 		t.Fatal("start middleware did not resolve flow dependency")
 	}
 }
+
+func TestCallUserInterfaceOverridesFlowDefinitionInMiddlewareAndNode(t *testing.T) {
+	svc := NewService(NewRepository(openFlowTestDB(t)))
+	if err := AutoMigrate(svc.store.db); err != nil {
+		t.Fatalf("auto migrate flow tables: %v", err)
+	}
+	if err := svc.RegisterFlow(Flow{
+		Name:           "call-dependency-flow",
+		UserInterfaces: []any{testGreeterValue("flow value")},
+		Nodes: []FlowNode{{Name: "run", Action: func(_ context.Context, _ string, runtime Runtime) (string, error) {
+			greeter, err := GetInterface[testGreeter](runtime)
+			if err != nil {
+				return "", err
+			}
+			return greeter.Greet(), nil
+		}}},
+	}); err != nil {
+		t.Fatalf("register flow: %v", err)
+	}
+	middlewareValue := make(chan string, 1)
+	svc.RegisterStartMiddleware(StartMiddlewareFunc(func(ctx context.Context, request StartRequest, next StartFlowNext) (*FlowExecutionContext, error) {
+		greeter, err := GetInterface[testGreeter](request)
+		if err != nil {
+			return nil, err
+		}
+		middlewareValue <- greeter.Greet()
+		return next(ctx, request)
+	}))
+
+	exec, err := svc.StartFlow(context.Background(), "call-dependency-flow", "input", StartOptions{
+		UserInterfaces: []any{testGreeterValue("call value")},
+	})
+	if err != nil {
+		t.Fatalf("start flow: %v", err)
+	}
+	waitForDone(t, exec.Done())
+	if exec.EndToken != "call value" {
+		t.Fatalf("node resolved %q, want call value", exec.EndToken)
+	}
+	select {
+	case value := <-middlewareValue:
+		if value != "call value" {
+			t.Fatalf("middleware resolved %q, want call value", value)
+		}
+	default:
+		t.Fatal("start middleware did not resolve call-specific dependency")
+	}
+}

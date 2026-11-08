@@ -49,10 +49,18 @@ func (r *executionRuntime) resolveUserInterface(targetType reflect.Type) (any, e
 	if r == nil {
 		return nil, errors.New("workflow runtime is not configured")
 	}
-	return resolveUserInterfaceFrom(r.userInterfaces, targetType)
+	return resolveUserInterfaceFrom(r.callInterfaces, r.flowInterfaces, targetType)
 }
 
-func resolveUserInterfaceFrom(dependencies []any, targetType reflect.Type) (any, error) {
+func resolveUserInterfaceFrom(preferred, fallback []any, targetType reflect.Type) (any, error) {
+	resolved, err := resolveUserInterfaceIn(preferred, targetType)
+	if err == nil || !errors.Is(err, ErrUserInterfaceNotFound) {
+		return resolved, err
+	}
+	return resolveUserInterfaceIn(fallback, targetType)
+}
+
+func resolveUserInterfaceIn(dependencies []any, targetType reflect.Type) (any, error) {
 	var match any
 	for _, dependency := range dependencies {
 		if dependency == nil {

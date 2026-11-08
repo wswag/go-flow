@@ -247,7 +247,8 @@ func (s *Service) StartFlow(ctx context.Context, name string, startToken string,
 	request := StartRequest{FlowName: name, StartToken: startToken, Options: startOptions}
 	var invoke func(int, context.Context, StartRequest) (*FlowExecutionContext, error)
 	invoke = func(index int, ctx context.Context, request StartRequest) (*FlowExecutionContext, error) {
-		request.UserInterfaces = s.flowUserInterfaces(request.FlowName)
+		request.UserInterfaces = request.Options.UserInterfaces
+		request.FlowUserInterfaces = s.flowUserInterfaces(request.FlowName)
 		if index == len(middlewares) {
 			return s.startFlowCore(ctx, request)
 		}
@@ -384,6 +385,7 @@ func (s *Service) startFlowAtNode(ctx context.Context, name string, startToken s
 		done:              make(chan struct{}),
 		startMiddlewares:  append([]StartMiddleware(nil), options.Middlewares...),
 		actionMiddlewares: append([]ActionMiddleware(nil), options.ActionMiddlewares...),
+		userInterfaces:    append([]any(nil), options.UserInterfaces...),
 	}
 	s.active[instanceID] = exec
 	if idempotencyKey != "" {
@@ -1176,7 +1178,7 @@ func (s *Service) execute(exec *FlowExecutionContext) {
 		exec.StartToken = input
 
 		currentEvent := s.buildFlowEvent(instance, flow, &node, FlowStatusRunning, "", nil, false)
-		runtime := s.runtimeFor(exec.FlowInstanceID, node.ID, node.NodeIndex, flow.Name, flow.UserInterfaces, currentEvent)
+		runtime := s.runtimeFor(exec.FlowInstanceID, node.ID, node.NodeIndex, flow.Name, flow.UserInterfaces, exec.userInterfaces, currentEvent)
 		action := flow.Nodes[node.NodeIndex].Action
 		s.mu.RLock()
 		actionMiddlewares := append([]ActionMiddleware(nil), s.actionMiddlewares...)
@@ -1320,14 +1322,15 @@ func (s *Service) DecodeFlowStartTokenMetaSet(ctx context.Context, flowInstanceI
 }
 
 // runtimeFor builds the per-node runtime supplied to an action.
-func (s *Service) runtimeFor(flowInstanceID uint, nodeID uint, nodeIndex int, flowName string, userInterfaces []any, currentEvent FlowEvent) *executionRuntime {
+func (s *Service) runtimeFor(flowInstanceID uint, nodeID uint, nodeIndex int, flowName string, flowInterfaces []any, callInterfaces []any, currentEvent FlowEvent) *executionRuntime {
 	return &executionRuntime{
 		service:        s,
 		flowInstanceID: flowInstanceID,
 		nodeID:         nodeID,
 		nodeIndex:      nodeIndex,
 		flowName:       strings.TrimSpace(flowName),
-		userInterfaces: userInterfaces,
+		flowInterfaces: flowInterfaces,
+		callInterfaces: callInterfaces,
 		currentEvent:   currentEvent,
 	}
 }
@@ -2017,7 +2020,8 @@ type executionRuntime struct {
 	nodeID                uint
 	nodeIndex             int
 	flowName              string
-	userInterfaces        []any
+	flowInterfaces        []any
+	callInterfaces        []any
 	currentEvent          FlowEvent
 	waitForTriggeredFlows bool
 	triggeredFlowCount    int
@@ -2387,6 +2391,7 @@ func (s *Service) dispatchSystemNode(ctx context.Context, node NodeInstance) (*F
 		ParentSystemNodeID: &node.ID,
 		Metadata:           childMetadata,
 		Middlewares:        s.executionStartMiddlewares(node.FlowInstanceID),
+		UserInterfaces:     s.executionUserInterfaces(node.FlowInstanceID),
 	})
 	if err != nil {
 		// Eine parallele Instanz kann den durch parent_system_node_id eindeutig
@@ -2450,6 +2455,18 @@ func (s *Service) executionStartMiddlewares(flowInstanceID uint) []StartMiddlewa
 	middlewares := append([]StartMiddleware(nil), exec.startMiddlewares...)
 	s.mu.RUnlock()
 	return middlewares
+}
+
+func (s *Service) executionUserInterfaces(flowInstanceID uint) []any {
+	s.mu.RLock()
+	exec := s.active[flowInstanceID]
+	if exec == nil {
+		s.mu.RUnlock()
+		return nil
+	}
+	userInterfaces := append([]any(nil), exec.userInterfaces...)
+	s.mu.RUnlock()
+	return userInterfaces
 }
 
 // syncSystemNodeCompletion updates the parent system node from its child flow's

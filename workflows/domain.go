@@ -96,6 +96,7 @@ type FlowExecutionContext struct {
 	done              chan struct{}
 	startMiddlewares  []StartMiddleware
 	actionMiddlewares []ActionMiddleware
+	userInterfaces    []any
 }
 
 // StartOptions describes optional behavior for StartFlow. TargetFlowName
@@ -124,6 +125,10 @@ type StartOptions struct {
 	// engine-level action middleware. These functions are process-local and are
 	// not persisted for a later resume.
 	ActionMiddlewares []ActionMiddleware
+	// UserInterfaces supplies call-specific dependencies. They take precedence
+	// over matching dependencies in Flow.UserInterfaces and are process-local,
+	// so they are not restored after a process restart.
+	UserInterfaces []any
 }
 
 // CorrelationFailureEvent beschreibt den terminalen Fehler eines Laufs innerhalb
