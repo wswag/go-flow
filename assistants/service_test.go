@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wswag/go-flow/tokens"
 	"github.com/wswag/go-flow/workflows"
 
 	"gorm.io/driver/sqlite"
@@ -24,6 +25,15 @@ func openAssistantTestService(t *testing.T) *Service {
 	return NewService(NewRepository(db))
 }
 
+func newAssistantTestRun(t *testing.T, svc *Service, chainName string, key StateKey) StateKey {
+	t.Helper()
+	runKey, err := svc.NewRun(context.Background(), chainName, key, "", "")
+	if err != nil {
+		t.Fatalf("create assistant test run: %v", err)
+	}
+	return runKey
+}
+
 func TestAssistantServiceAdvancesWithoutCommitHandler(t *testing.T) {
 	svc := openAssistantTestService(t)
 	err := svc.RegisterChain(ChainDefinition{
@@ -37,7 +47,8 @@ func TestAssistantServiceAdvancesWithoutCommitHandler(t *testing.T) {
 		t.Fatalf("register chain: %v", err)
 	}
 
-	step, chain, err := svc.CommitStep(context.Background(), "demo", StateKey{ScopeKey: "scope:1"}, "first")
+	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
+	step, chain, err := svc.CommitStep(context.Background(), "demo", key, "first")
 	if err != nil {
 		t.Fatalf("commit step: %v", err)
 	}
@@ -63,11 +74,12 @@ func TestAssistantServiceResetsStaleChainWhenPreparedWorkflowIsNoLongerRegistere
 	}); err != nil {
 		t.Fatalf("register chain: %v", err)
 	}
-	key := StateKey{ScopeKey: "scope:1", ActorKey: "actor:1"}
+	key := newAssistantTestRun(t, svc, "stale-workflow-demo", StateKey{ScopeKey: "scope:1", ActorKey: "actor:1"})
 	if err := svc.repo.SaveRecord(context.Background(), &ChainRecord{
 		Name:      "stale-workflow-demo",
 		ScopeKey:  key.ScopeKey,
 		ActorKey:  key.ActorKey,
+		DraftID:   key.DraftID,
 		StateJSON: `{"currentStep":"workflow_wait","steps":{"start":{"completedAt":"2026-08-31T10:00:00Z"}}}`,
 	}); err != nil {
 		t.Fatalf("save stale state: %v", err)
@@ -120,11 +132,12 @@ func TestAssistantServiceAdvancePendingChainsHonorsAutoCommitPredicate(t *testin
 	}); err != nil {
 		t.Fatalf("register chain: %v", err)
 	}
-	key := StateKey{ScopeKey: "scope:1", ActorKey: "actor:1"}
+	key := newAssistantTestRun(t, svc, "waiting-demo", StateKey{ScopeKey: "scope:1", ActorKey: "actor:1"})
 	if err := svc.repo.SaveRecord(context.Background(), &ChainRecord{
 		Name:      "waiting-demo",
 		ScopeKey:  key.ScopeKey,
 		ActorKey:  key.ActorKey,
+		DraftID:   key.DraftID,
 		StateJSON: `{"currentStep":"workflow_wait","steps":{}}`,
 	}); err != nil {
 		t.Fatalf("save waiting state: %v", err)
@@ -181,11 +194,12 @@ func TestAssistantServiceAdvancePendingChainsSkipsUnrelatedPrepare(t *testing.T)
 	}); err != nil {
 		t.Fatalf("register chain: %v", err)
 	}
-	key := StateKey{ScopeKey: "scope:1", ActorKey: "actor:1"}
+	key := newAssistantTestRun(t, svc, "unrelated-wait-demo", StateKey{ScopeKey: "scope:1", ActorKey: "actor:1"})
 	if err := svc.repo.SaveRecord(context.Background(), &ChainRecord{
 		Name:      "unrelated-wait-demo",
 		ScopeKey:  key.ScopeKey,
 		ActorKey:  key.ActorKey,
+		DraftID:   key.DraftID,
 		StateJSON: `{"currentStep":"workflow_wait","steps":{}}`,
 	}); err != nil {
 		t.Fatalf("save waiting state: %v", err)
@@ -238,10 +252,12 @@ func TestAssistantServiceAdvancePendingChainsOnlyAdvancesMatchingWorkflow(t *tes
 			t.Fatalf("register %s: %v", test.name, err)
 		}
 		key := StateKey{ScopeKey: "scope:1", ActorKey: "actor:1"}
+		key = newAssistantTestRun(t, svc, test.name, key)
 		if err := svc.repo.SaveRecord(context.Background(), &ChainRecord{
 			Name:      test.name,
 			ScopeKey:  key.ScopeKey,
 			ActorKey:  key.ActorKey,
+			DraftID:   key.DraftID,
 			StateJSON: `{"currentStep":"workflow_wait","steps":{}}`,
 		}); err != nil {
 			t.Fatalf("save %s: %v", test.name, err)
@@ -274,7 +290,7 @@ func TestAssistantServiceResetsToFirstStepAfterLastCommitByDefault(t *testing.T)
 		t.Fatalf("register chain: %v", err)
 	}
 
-	key := StateKey{ScopeKey: "scope:1"}
+	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
 	if _, _, err := svc.CommitStep(context.Background(), "demo", key, "first"); err != nil {
 		t.Fatalf("commit first: %v", err)
 	}
@@ -317,12 +333,13 @@ func TestAssistantServicePrepareAndPatchMergeInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register chain: %v", err)
 	}
-	if _, _, err := svc.UpdateStepInput(context.Background(), "demo", StateKey{ScopeKey: "scope:1"}, "second", map[string]any{
+	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
+	if _, _, err := svc.UpdateStepInput(context.Background(), "demo", key, "second", map[string]any{
 		"kind": "patched",
 	}); err != nil {
 		t.Fatalf("update step input: %v", err)
 	}
-	step, _, err := svc.Step(context.Background(), "demo", StateKey{ScopeKey: "scope:1"}, "second")
+	step, _, err := svc.Step(context.Background(), "demo", key, "second")
 	if err != nil {
 		t.Fatalf("load step: %v", err)
 	}
@@ -359,14 +376,15 @@ func TestAssistantServiceCurrentStepDoesNotPrepareFutureSteps(t *testing.T) {
 		t.Fatalf("register chain: %v", err)
 	}
 
-	if _, _, err := svc.CurrentStep(context.Background(), "demo", StateKey{ScopeKey: "scope:1"}); err != nil {
+	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
+	if _, _, err := svc.CurrentStep(context.Background(), "demo", key); err != nil {
 		t.Fatalf("current step: %v", err)
 	}
 	if futurePrepareCalls != 0 {
 		t.Fatalf("future prepare calls after current step = %d, want 0", futurePrepareCalls)
 	}
 
-	step, _, err := svc.Step(context.Background(), "demo", StateKey{ScopeKey: "scope:1"}, "second")
+	step, _, err := svc.Step(context.Background(), "demo", key, "second")
 	if err != nil {
 		t.Fatalf("future step: %v", err)
 	}
@@ -396,7 +414,7 @@ func TestAssistantServicePersistsLargeStepInputPatch(t *testing.T) {
 	}
 
 	largeNote := strings.Repeat("feedback-", 80)
-	key := StateKey{ScopeKey: "scope:1"}
+	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
 	step, _, err := svc.UpdateStepInput(context.Background(), "demo", key, "first", map[string]any{
 		"note": largeNote,
 	})
@@ -459,7 +477,7 @@ func TestAssistantServiceCommitStepWithInputPatchPersistsAndAdvances(t *testing.
 		t.Fatalf("register chain: %v", err)
 	}
 
-	key := StateKey{ScopeKey: "scope:1"}
+	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
 	step, chain, err := svc.CommitStepWithInputPatch(context.Background(), "demo", key, "first", map[string]any{
 		"note": "fast",
 	})
@@ -518,10 +536,11 @@ func TestAssistantServiceAutoCommitAdvancesCurrentStep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register chain: %v", err)
 	}
-	if _, _, err := svc.CommitStep(context.Background(), "demo", StateKey{ScopeKey: "scope:1"}, "first"); err != nil {
+	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
+	if _, _, err := svc.CommitStep(context.Background(), "demo", key, "first"); err != nil {
 		t.Fatalf("commit first: %v", err)
 	}
-	step, _, err := svc.CurrentStep(context.Background(), "demo", StateKey{ScopeKey: "scope:1"})
+	step, _, err := svc.CurrentStep(context.Background(), "demo", key)
 	if err != nil {
 		t.Fatalf("current step: %v", err)
 	}
@@ -544,7 +563,7 @@ func TestAssistantServiceKeepsCompletedFinalStepWhenConfigured(t *testing.T) {
 		t.Fatalf("register chain: %v", err)
 	}
 
-	key := StateKey{ScopeKey: "scope:1"}
+	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
 	if _, _, err := svc.CommitStep(context.Background(), "demo", key, "first"); err != nil {
 		t.Fatalf("commit first: %v", err)
 	}
@@ -576,7 +595,7 @@ func TestAssistantServiceRejectsCommitForCompletedChain(t *testing.T) {
 		t.Fatalf("register chain: %v", err)
 	}
 
-	key := StateKey{ScopeKey: "scope:1"}
+	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
 	if _, _, err := svc.CommitStep(context.Background(), "demo", key, "first"); err != nil {
 		t.Fatalf("commit first: %v", err)
 	}
@@ -598,7 +617,8 @@ func TestAssistantServiceRejectsNonCurrentCommit(t *testing.T) {
 		t.Fatalf("register chain: %v", err)
 	}
 
-	if _, _, err := svc.CommitStep(context.Background(), "demo", StateKey{ScopeKey: "scope:1"}, "second"); err == nil {
+	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
+	if _, _, err := svc.CommitStep(context.Background(), "demo", key, "second"); err == nil {
 		t.Fatalf("expected non-current step commit to fail")
 	}
 }
@@ -633,7 +653,7 @@ func TestAssistantServiceCommittedStepUpdateMarksFollowingStepsStale(t *testing.
 		t.Fatalf("register chain: %v", err)
 	}
 
-	key := StateKey{ScopeKey: "scope:1"}
+	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
 	if _, _, err := svc.CommitStep(context.Background(), "demo", key, "first"); err != nil {
 		t.Fatalf("commit first: %v", err)
 	}
@@ -681,7 +701,7 @@ func TestAssistantServiceRecommittingUnchangedInputKeepsFollowingSteps(t *testin
 	}); err != nil {
 		t.Fatalf("register chain: %v", err)
 	}
-	key := StateKey{ScopeKey: "scope:1"}
+	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
 	if _, _, err := svc.CommitStepWithInputPatch(context.Background(), "demo", key, "first", map[string]any{"value": "same"}); err != nil {
 		t.Fatalf("commit first: %v", err)
 	}
@@ -721,7 +741,7 @@ func TestAssistantServiceUpdatingUnchangedInputKeepsCurrentProgress(t *testing.T
 	}); err != nil {
 		t.Fatalf("register chain: %v", err)
 	}
-	key := StateKey{ScopeKey: "scope:1"}
+	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
 	if _, _, err := svc.CommitStepWithInputPatch(context.Background(), "demo", key, "first", map[string]any{"value": "same"}); err != nil {
 		t.Fatalf("commit first: %v", err)
 	}
@@ -769,7 +789,7 @@ func TestAssistantServiceCommittedStepUpdateUsesDedicatedUpdateCommit(t *testing
 		t.Fatalf("register chain: %v", err)
 	}
 
-	key := StateKey{ScopeKey: "scope:1"}
+	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
 	if _, _, err := svc.CommitStep(context.Background(), "demo", key, "first"); err != nil {
 		t.Fatalf("commit first: %v", err)
 	}
@@ -809,7 +829,7 @@ func TestAssistantServiceRejectsCommittedStepUpdateWithoutPolicy(t *testing.T) {
 		t.Fatalf("register chain: %v", err)
 	}
 
-	key := StateKey{ScopeKey: "scope:1"}
+	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
 	if _, _, err := svc.CommitStep(context.Background(), "demo", key, "first"); err != nil {
 		t.Fatalf("commit first: %v", err)
 	}
@@ -842,7 +862,7 @@ func TestAssistantServiceStepSnapshotSeparatesPreparedInputAndPatch(t *testing.T
 	if err != nil {
 		t.Fatalf("register chain: %v", err)
 	}
-	key := StateKey{ScopeKey: "scope:1"}
+	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
 	step, _, err := svc.UpdateStepInput(context.Background(), "demo", key, "second", map[string]any{
 		"userField": "custom",
 	})
@@ -884,7 +904,8 @@ func TestAssistantServiceRejectsUnknownExplicitNextStep(t *testing.T) {
 		t.Fatalf("register chain: %v", err)
 	}
 
-	if _, _, err := svc.CommitStep(context.Background(), "demo", StateKey{ScopeKey: "scope:1"}, "first"); err == nil {
+	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
+	if _, _, err := svc.CommitStep(context.Background(), "demo", key, "first"); err == nil {
 		t.Fatalf("expected invalid explicit next step to fail")
 	}
 }
@@ -902,7 +923,7 @@ func TestAssistantServiceResetStepClearsFollowingState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register chain: %v", err)
 	}
-	key := StateKey{ScopeKey: "scope:1"}
+	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
 	if _, _, err := svc.CommitStep(context.Background(), "demo", key, "first"); err != nil {
 		t.Fatalf("commit first: %v", err)
 	}
@@ -956,7 +977,7 @@ func TestAssistantServiceResetStepRestoresPreparedInputWithoutPatches(t *testing
 	if err != nil {
 		t.Fatalf("register chain: %v", err)
 	}
-	key := StateKey{ScopeKey: "scope:1"}
+	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
 	if _, _, err := svc.UpdateStepInput(context.Background(), "demo", key, "second", map[string]any{
 		"kind":        "patched",
 		"userField":   "custom",
@@ -999,6 +1020,92 @@ func TestAssistantServiceResetStepRestoresPreparedInputWithoutPatches(t *testing
 	}
 }
 
+func TestAssistantRunDraftIDsKeepStateIndependent(t *testing.T) {
+	svc := openAssistantTestService(t)
+	if err := svc.RegisterChain(ChainDefinition{
+		Name:  "drafts",
+		Steps: []StepDefinition{{Name: "profile", Sequence: 1, Input: map[string]any{"name": ""}}},
+	}); err != nil {
+		t.Fatalf("register chain: %v", err)
+	}
+	baseKey := StateKey{ScopeKey: "scope:1", ActorKey: "actor:1"}
+	firstKey := newAssistantTestRun(t, svc, "drafts", baseKey)
+	secondKey := newAssistantTestRun(t, svc, "drafts", baseKey)
+	if firstKey.DraftID == "" || secondKey.DraftID == "" || firstKey.DraftID == secondKey.DraftID {
+		t.Fatalf("draft ids are not unique: first=%q second=%q", firstKey.DraftID, secondKey.DraftID)
+	}
+
+	for _, test := range []struct {
+		key   StateKey
+		value string
+	}{{firstKey, "Ada"}, {secondKey, "Grace"}} {
+		if _, _, err := svc.UpdateStepInput(context.Background(), "drafts", test.key, "profile", map[string]any{"name": test.value}); err != nil {
+			t.Fatalf("update run %q: %v", test.key.DraftID, err)
+		}
+	}
+	first, _, err := svc.Step(context.Background(), "drafts", firstKey, "profile")
+	if err != nil {
+		t.Fatalf("read first run: %v", err)
+	}
+	second, _, err := svc.Step(context.Background(), "drafts", secondKey, "profile")
+	if err != nil {
+		t.Fatalf("read second run: %v", err)
+	}
+	var firstInput, secondInput map[string]any
+	if err := json.Unmarshal(first.Input, &firstInput); err != nil {
+		t.Fatalf("decode first input: %v", err)
+	}
+	if err := json.Unmarshal(second.Input, &secondInput); err != nil {
+		t.Fatalf("decode second input: %v", err)
+	}
+	if firstInput["name"] != "Ada" || secondInput["name"] != "Grace" {
+		t.Fatalf("run inputs crossed: first=%#v second=%#v", firstInput, secondInput)
+	}
+}
+
+func TestAssistantStepContextBuildsTaggedToken(t *testing.T) {
+	raw, err := (PrepareContext{ChainName: "onboarding", Current: "profile"}).
+		NewTokenBuilder(map[string]any{"name": "Ada"}).Build()
+	if err != nil {
+		t.Fatalf("build assistant token: %v", err)
+	}
+	reader := tokens.NewTokenReader(raw)
+	if err := reader.Err(); err != nil {
+		t.Fatalf("read assistant token: %v", err)
+	}
+	if got, ok := reader.Meta(TokenMetaAssistantName); !ok || got != "onboarding" {
+		t.Fatalf("assistant metadata = %#v, want onboarding", got)
+	}
+	if got, ok := reader.Meta(TokenMetaAssistantStep); !ok || got != "profile" {
+		t.Fatalf("step metadata = %#v, want profile", got)
+	}
+	if got := reader.Type(); got != AssistantTokenTypeStep {
+		t.Fatalf("token type = %q, want %q", got, AssistantTokenTypeStep)
+	}
+	var state map[string]string
+	if err := reader.DecodeMetaSet(TokenMetaAssistantStateSet, &state); err != nil {
+		t.Fatalf("decode assistant state: %v", err)
+	}
+	if state["name"] != "Ada" {
+		t.Fatalf("state = %#v, want name Ada", state)
+	}
+
+	commitRaw, err := (CommitContext{
+		PrepareContext: PrepareContext{ChainName: "onboarding", Current: "profile"},
+		Step:           StepSnapshot{Name: "review"},
+	}).NewTokenBuilder(map[string]any{"approved": true}).Build()
+	if err != nil {
+		t.Fatalf("build commit token: %v", err)
+	}
+	commitReader := tokens.NewTokenReader(commitRaw)
+	if err := commitReader.Err(); err != nil {
+		t.Fatalf("read commit token: %v", err)
+	}
+	if step, ok := commitReader.Meta(TokenMetaAssistantStep); !ok || step != "review" {
+		t.Fatalf("commit step metadata = %#v, want review", step)
+	}
+}
+
 func TestAssistantServiceJumpToStepKeepsFollowingState(t *testing.T) {
 	svc := openAssistantTestService(t)
 	err := svc.RegisterChain(ChainDefinition{
@@ -1012,7 +1119,7 @@ func TestAssistantServiceJumpToStepKeepsFollowingState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register chain: %v", err)
 	}
-	key := StateKey{ScopeKey: "scope:1"}
+	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
 	if _, _, err := svc.CommitStep(context.Background(), "demo", key, "first"); err != nil {
 		t.Fatalf("commit first: %v", err)
 	}
@@ -1058,7 +1165,8 @@ func TestAssistantServiceJumpToStepRejectsUnreachedFutureStep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register chain: %v", err)
 	}
-	if _, _, err := svc.JumpToStep(context.Background(), "demo", StateKey{ScopeKey: "scope:1"}, "third"); err == nil {
+	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
+	if _, _, err := svc.JumpToStep(context.Background(), "demo", key, "third"); err == nil {
 		t.Fatalf("expected jump to unreached step to fail")
 	}
 }
@@ -1075,7 +1183,8 @@ func TestAssistantServiceJumpToStepAllowsExplicitUnreachedEntryStep(t *testing.T
 	if err != nil {
 		t.Fatalf("register chain: %v", err)
 	}
-	step, _, err := svc.JumpToStep(context.Background(), "demo", StateKey{ScopeKey: "scope:1"}, "new-entry")
+	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
+	step, _, err := svc.JumpToStep(context.Background(), "demo", key, "new-entry")
 	if err != nil {
 		t.Fatalf("jump to explicitly allowed entry step: %v", err)
 	}
@@ -1109,7 +1218,7 @@ func TestAssistantServiceJumpToStepAllowsPersistedReachabilityProof(t *testing.T
 	if err != nil {
 		t.Fatalf("register chain: %v", err)
 	}
-	key := StateKey{ScopeKey: "scope:1"}
+	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
 	if _, _, err := svc.JumpToStep(context.Background(), "demo", key, "workflow-wait"); err == nil {
 		t.Fatalf("expected missing reachability proof to reject jump")
 	}
@@ -1137,7 +1246,7 @@ func TestAssistantServiceJumpToStepAllowsReachedInputPatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register chain: %v", err)
 	}
-	key := StateKey{ScopeKey: "scope:1"}
+	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
 	if _, _, err := svc.CommitStep(context.Background(), "demo", key, "first"); err != nil {
 		t.Fatalf("commit first: %v", err)
 	}
@@ -1176,7 +1285,8 @@ func TestAssistantServiceWaitClientStepReturnsOnlyExplicitProjection(t *testing.
 	}}}); err != nil {
 		t.Fatalf("register chain: %v", err)
 	}
-	result, err := svc.WaitClientStep(context.Background(), "public", StateKey{ScopeKey: "public:1"}, "wait", nil, 0)
+	key := newAssistantTestRun(t, svc, "public", StateKey{ScopeKey: "public:1"})
+	result, err := svc.WaitClientStep(context.Background(), "public", key, "wait", nil, 0)
 	if err != nil {
 		t.Fatalf("wait public step: %v", err)
 	}
@@ -1203,7 +1313,8 @@ func TestAssistantServiceClientCurrentStepReturnsOnlyAllowListedFields(t *testin
 	}}}); err != nil {
 		t.Fatalf("register chain: %v", err)
 	}
-	step, chain, err := svc.ClientCurrentStep(context.Background(), "client", StateKey{ScopeKey: "scope:1"})
+	key := newAssistantTestRun(t, svc, "client", StateKey{ScopeKey: "scope:1"})
+	step, chain, err := svc.ClientCurrentStep(context.Background(), "client", key)
 	if err != nil {
 		t.Fatalf("load client current step: %v", err)
 	}

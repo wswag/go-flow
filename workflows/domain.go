@@ -87,6 +87,7 @@ type FlowExecutionContext struct {
 	Error            error
 
 	done              chan struct{}
+	startMiddlewares  []StartMiddleware
 	actionMiddlewares []ActionMiddleware
 }
 
@@ -96,7 +97,9 @@ type FlowExecutionContext struct {
 type StartOptions struct {
 	// Metadata is persisted with the flow instance and its initial node.
 	Metadata map[string]any
-	// IdempotencyKey reuses an active execution with the same flow name and key.
+	// IdempotencyKey is used by Service.IdempotencyMiddleware to find and reuse
+	// an active execution with the same flow name and key. StartFlow adds this
+	// middleware at the end of the chain unless it is already present.
 	IdempotencyKey string
 
 	// ParentSystemNodeID links a child flow to the system node that dispatched it.
@@ -106,7 +109,9 @@ type StartOptions struct {
 	TargetFlowName string
 	// Middlewares adds middleware for this StartFlow call after engine-level
 	// middleware. The chain is fixed when StartFlow is called; changes to this
-	// slice from within a middleware do not alter the active chain.
+	// slice from within a middleware do not alter the active chain. While this
+	// execution is active, the same middleware also runs for its triggered child
+	// flows.
 	Middlewares []StartMiddleware
 	// ActionMiddlewares wraps each node action in this execution after
 	// engine-level action middleware. These functions are process-local and are

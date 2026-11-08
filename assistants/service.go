@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wswag/go-flow/tokens"
 	"github.com/wswag/go-flow/workflows"
 
 	"gorm.io/gorm"
@@ -228,6 +229,12 @@ type PrepareContext struct {
 	CurrentResult json.RawMessage
 }
 
+// NewTokenBuilder creates a token tagged with this assistant chain and current
+// step. A non-nil state is stored as assistant.state_set.
+func (c PrepareContext) NewTokenBuilder(state any) *tokens.TokenBuilder {
+	return NewAssistantTokenBuilder(c.ChainName, c.Current, state)
+}
+
 // Step liefert einen bereits vorbereiteten Schritt aus dem aktuellen Kontext.
 func (c PrepareContext) Step(name string) (StepSnapshot, bool) {
 	needle := strings.TrimSpace(name)
@@ -243,6 +250,16 @@ func (c PrepareContext) Step(name string) (StepSnapshot, bool) {
 type CommitContext struct {
 	PrepareContext
 	Step StepSnapshot
+}
+
+// NewTokenBuilder creates a token tagged with the assistant chain and the step
+// being committed.
+func (c CommitContext) NewTokenBuilder(state any) *tokens.TokenBuilder {
+	stepName := strings.TrimSpace(c.Step.Name)
+	if stepName == "" {
+		stepName = c.Current
+	}
+	return NewAssistantTokenBuilder(c.ChainName, stepName, state)
 }
 
 // UpdatePolicyContext erweitert den PrepareContext für Entscheidungen über nachträgliche Schrittänderungen.
@@ -535,10 +552,11 @@ func (s *Service) AdvancePendingChains(ctx context.Context, key StateKey, workfl
 		if chainErr != nil {
 			continue
 		}
-		if preconditionErr := s.checkPrecondition(ctx, chain, key); preconditionErr != nil {
+		runKey := StateKey{ScopeKey: record.ScopeKey, ActorKey: record.ActorKey, DraftID: record.DraftID}
+		if preconditionErr := s.checkPrecondition(ctx, chain, runKey); preconditionErr != nil {
 			continue
 		}
-		state, loadErr := s.loadState(ctx, chain.name, key)
+		state, loadErr := s.loadState(ctx, chain.name, runKey)
 		if loadErr != nil {
 			return updated, loadErr
 		}
@@ -551,11 +569,11 @@ func (s *Service) AdvancePendingChains(ctx context.Context, key StateKey, workfl
 			if current.WorkflowReference == nil {
 				continue
 			}
-			step, snapshot, snapshotErr := s.unpreparedCurrentStepSnapshot(chain, key, state, currentStepName)
+			step, snapshot, snapshotErr := s.unpreparedCurrentStepSnapshot(chain, runKey, state, currentStepName)
 			if snapshotErr != nil {
 				return updated, snapshotErr
 			}
-			clientContext := ClientResultContext{Key: key, Chain: snapshot, Step: step}
+			clientContext := ClientResultContext{Key: runKey, Chain: snapshot, Step: step}
 			waitingFor, referenceErr := current.WorkflowReference(ctx, clientContext)
 			if referenceErr != nil {
 				return updated, referenceErr
@@ -564,7 +582,7 @@ func (s *Service) AdvancePendingChains(ctx context.Context, key StateKey, workfl
 				continue
 			}
 		}
-		next, advanceErr := s.resolveCurrentChain(ctx, chain.name, key, true)
+		next, advanceErr := s.resolveCurrentChain(ctx, chain.name, runKey, true)
 		if advanceErr != nil {
 			return updated, advanceErr
 		}

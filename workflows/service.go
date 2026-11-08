@@ -23,6 +23,7 @@ var ErrFlowNotRegistered = errors.New("flow is not registered")
 
 type Service struct {
 	mu                sync.RWMutex
+	idempotencyMu     sync.Mutex
 	store             *Repository
 	flows             map[string]Flow
 	active            map[uint]*FlowExecutionContext
@@ -146,6 +147,54 @@ func (s *Service) RegisterStartMiddleware(middleware StartMiddleware) {
 	s.mu.Unlock()
 }
 
+// IdempotencyMiddleware returns a start middleware that reuses an active flow
+// with the same flow name and StartOptions.IdempotencyKey. Register it with
+// RegisterStartMiddleware or pass it in StartOptions.Middlewares at the point
+// in the chain where idempotency should be applied. If no idempotency middleware
+// for this service is present in the chain, StartFlow adds it as the final
+// middleware automatically.
+//
+// Starts using this middleware are serialized while the lookup and downstream
+// start run, so concurrent calls in this service do not create duplicate runs.
+func (s *Service) IdempotencyMiddleware() StartMiddleware {
+	return idempotencyStartMiddleware{service: s}
+}
+
+type idempotencyStartMiddleware struct {
+	service *Service
+}
+
+func (m idempotencyStartMiddleware) Start(ctx context.Context, request StartRequest, next StartFlowNext) (*FlowExecutionContext, error) {
+	s := m.service
+	key := strings.TrimSpace(request.Options.IdempotencyKey)
+	if s == nil || key == "" {
+		return next(ctx, request)
+	}
+	if active, _ := ctx.Value(idempotencyMiddlewareContextKey{}).(idempotencyMiddlewareContext); active.service == s {
+		return next(ctx, request)
+	}
+
+	s.idempotencyMu.Lock()
+	defer s.idempotencyMu.Unlock()
+
+	existing, err := s.FindActiveFlowByIdempotencyKey(ctx, request.FlowName, key)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		existing.Reused = true
+		return existing, nil
+	}
+	ctx = context.WithValue(ctx, idempotencyMiddlewareContextKey{}, idempotencyMiddlewareContext{service: s})
+	return next(ctx, request)
+}
+
+type idempotencyMiddlewareContextKey struct{}
+
+type idempotencyMiddlewareContext struct {
+	service *Service
+}
+
 // RegisterActionMiddleware adds an engine-level action middleware. Registered
 // middleware wraps actions in registration order, with the first registered
 // middleware as the outermost wrapper.
@@ -177,6 +226,9 @@ func (s *Service) StartFlow(ctx context.Context, name string, startToken string,
 	middlewares := append([]StartMiddleware(nil), s.startMiddlewares...)
 	s.mu.RUnlock()
 	middlewares = append(middlewares, startOptions.Middlewares...)
+	if !hasIdempotencyMiddleware(middlewares, s) {
+		middlewares = append(middlewares, s.IdempotencyMiddleware())
+	}
 	request := StartRequest{FlowName: name, StartToken: startToken, Options: startOptions}
 	var invoke func(int, context.Context, StartRequest) (*FlowExecutionContext, error)
 	invoke = func(index int, ctx context.Context, request StartRequest) (*FlowExecutionContext, error) {
@@ -190,11 +242,19 @@ func (s *Service) StartFlow(ctx context.Context, name string, startToken string,
 	return invoke(0, ctx, request)
 }
 
+func hasIdempotencyMiddleware(middlewares []StartMiddleware, service *Service) bool {
+	for _, middleware := range middlewares {
+		if idempotency, ok := middleware.(idempotencyStartMiddleware); ok && idempotency.service == service {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) startFlowCore(ctx context.Context, request StartRequest) (*FlowExecutionContext, error) {
 	name := request.FlowName
 	startToken := request.StartToken
 	startOptions := request.Options
-	startOptions.Middlewares = nil
 	exec, err := s.startFlowAtNode(
 		ctx, name, startToken, 0, startOptions, true,
 	)
@@ -234,29 +294,6 @@ func (s *Service) startFlowAtNode(ctx context.Context, name string, startToken s
 		metadataJSON = string(encoded)
 	}
 	s.mu.Lock()
-	if existing := s.findActiveExecutionLocked(flow.Name, idempotencyKey); existing != nil {
-		existing.Reused = true
-		s.mu.Unlock()
-		return existing, nil
-	}
-	if idempotencyKey != "" {
-		existing, findErr := s.store.FindActiveFlowInstanceByNameAndIdempotencyKey(ctx, flow.Name, idempotencyKey)
-		if findErr == nil {
-			s.mu.Unlock()
-			exec, resumeErr := s.ResumeFlowInstance(ctx, existing.ID)
-			if resumeErr != nil {
-				return nil, resumeErr
-			}
-			if exec != nil {
-				exec.Reused = true
-			}
-			return exec, nil
-		}
-		if findErr != nil && !errors.Is(findErr, gorm.ErrRecordNotFound) {
-			s.mu.Unlock()
-			return nil, findErr
-		}
-	}
 	if err := s.store.Transaction(ctx, func(tx *Repository) error {
 		startTokenRecord := &Token{RawData: strings.TrimSpace(startToken)}
 		if err := tx.CreateToken(ctx, startTokenRecord); err != nil {
@@ -305,6 +342,7 @@ func (s *Service) startFlowAtNode(ctx context.Context, name string, startToken s
 		MetadataJSON:      metadataJSON,
 		IdempotencyKey:    idempotencyKey,
 		done:              make(chan struct{}),
+		startMiddlewares:  append([]StartMiddleware(nil), options.Middlewares...),
 		actionMiddlewares: append([]ActionMiddleware(nil), options.ActionMiddlewares...),
 	}
 	s.active[instanceID] = exec
@@ -2265,7 +2303,11 @@ func (s *Service) dispatchSystemNode(ctx context.Context, node NodeInstance) (*F
 		parentMetadata = parseFlowMetadata(node.FlowInstance.MetadataJSON).Raw
 	}
 	childMetadata := InheritCorrelationMetadata(parentMetadata, node.FlowInstanceID, node.ID, node.NodeIndex)
-	started, err := s.StartFlow(ctx, node.SystemFlowName, startToken, StartOptions{ParentSystemNodeID: &node.ID, Metadata: childMetadata})
+	started, err := s.StartFlow(ctx, node.SystemFlowName, startToken, StartOptions{
+		ParentSystemNodeID: &node.ID,
+		Metadata:           childMetadata,
+		Middlewares:        s.executionStartMiddlewares(node.FlowInstanceID),
+	})
 	if err != nil {
 		// Eine parallele Instanz kann den durch parent_system_node_id eindeutig
 		// geschützten Kindlauf zwischen unserer Prüfung und dem Create angelegt
@@ -2313,6 +2355,21 @@ func (s *Service) dispatchSystemNode(ctx context.Context, node NodeInstance) (*F
 		return nil, err
 	}
 	return started, nil
+}
+
+// executionStartMiddlewares returns the per-call start middleware inherited by
+// child flows of an active execution. Per-call middleware is process-local and
+// cannot be recovered after a restart.
+func (s *Service) executionStartMiddlewares(flowInstanceID uint) []StartMiddleware {
+	s.mu.RLock()
+	exec := s.active[flowInstanceID]
+	if exec == nil {
+		s.mu.RUnlock()
+		return nil
+	}
+	middlewares := append([]StartMiddleware(nil), exec.startMiddlewares...)
+	s.mu.RUnlock()
+	return middlewares
 }
 
 // syncSystemNodeCompletion updates the parent system node from its child flow's
