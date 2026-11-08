@@ -194,7 +194,6 @@ func (s *Service) startFlowCore(ctx context.Context, request StartRequest) (*Flo
 	name := request.FlowName
 	startToken := request.StartToken
 	startOptions := request.Options
-	startOptions.Middlewares = nil
 	exec, err := s.startFlowAtNode(
 		ctx, name, startToken, 0, startOptions, true,
 	)
@@ -305,6 +304,7 @@ func (s *Service) startFlowAtNode(ctx context.Context, name string, startToken s
 		MetadataJSON:      metadataJSON,
 		IdempotencyKey:    idempotencyKey,
 		done:              make(chan struct{}),
+		startMiddlewares:  append([]StartMiddleware(nil), options.Middlewares...),
 		actionMiddlewares: append([]ActionMiddleware(nil), options.ActionMiddlewares...),
 	}
 	s.active[instanceID] = exec
@@ -2265,7 +2265,11 @@ func (s *Service) dispatchSystemNode(ctx context.Context, node NodeInstance) (*F
 		parentMetadata = parseFlowMetadata(node.FlowInstance.MetadataJSON).Raw
 	}
 	childMetadata := InheritCorrelationMetadata(parentMetadata, node.FlowInstanceID, node.ID, node.NodeIndex)
-	started, err := s.StartFlow(ctx, node.SystemFlowName, startToken, StartOptions{ParentSystemNodeID: &node.ID, Metadata: childMetadata})
+	started, err := s.StartFlow(ctx, node.SystemFlowName, startToken, StartOptions{
+		ParentSystemNodeID: &node.ID,
+		Metadata:           childMetadata,
+		Middlewares:        s.executionStartMiddlewares(node.FlowInstanceID),
+	})
 	if err != nil {
 		// Eine parallele Instanz kann den durch parent_system_node_id eindeutig
 		// geschützten Kindlauf zwischen unserer Prüfung und dem Create angelegt
@@ -2313,6 +2317,21 @@ func (s *Service) dispatchSystemNode(ctx context.Context, node NodeInstance) (*F
 		return nil, err
 	}
 	return started, nil
+}
+
+// executionStartMiddlewares returns the per-call start middleware inherited by
+// child flows of an active execution. Per-call middleware is process-local and
+// cannot be recovered after a restart.
+func (s *Service) executionStartMiddlewares(flowInstanceID uint) []StartMiddleware {
+	s.mu.RLock()
+	exec := s.active[flowInstanceID]
+	if exec == nil {
+		s.mu.RUnlock()
+		return nil
+	}
+	middlewares := append([]StartMiddleware(nil), exec.startMiddlewares...)
+	s.mu.RUnlock()
+	return middlewares
 }
 
 // syncSystemNodeCompletion updates the parent system node from its child flow's

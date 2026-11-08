@@ -17,15 +17,15 @@ func TestRepositorySaveRecordUpsertsAssistantChain(t *testing.T) {
 		t.Fatalf("migrate assistant db: %v", err)
 	}
 	repo := NewRepository(db)
-	key := StateKey{ScopeKey: "scope:6", ActorKey: "user:13"}
+	key := StateKey{ScopeKey: "scope:6", ActorKey: "user:13", DraftID: "draft:repo-test"}
 
 	if err := repo.SaveRecord(context.Background(), &ChainRecord{
-		Name: "example_chain", ScopeKey: key.ScopeKey, ActorKey: key.ActorKey, StateJSON: `{"currentStep":"choose"}`,
+		Name: "example_chain", ScopeKey: key.ScopeKey, ActorKey: key.ActorKey, DraftID: key.DraftID, StateJSON: `{"currentStep":"choose"}`,
 	}); err != nil {
 		t.Fatalf("create chain: %v", err)
 	}
 	if err := repo.SaveRecord(context.Background(), &ChainRecord{
-		Name: "example_chain", ScopeKey: key.ScopeKey, ActorKey: key.ActorKey, StateJSON: `{"currentStep":"review"}`,
+		Name: "example_chain", ScopeKey: key.ScopeKey, ActorKey: key.ActorKey, DraftID: key.DraftID, StateJSON: `{"currentStep":"review"}`,
 	}); err != nil {
 		t.Fatalf("upsert chain: %v", err)
 	}
