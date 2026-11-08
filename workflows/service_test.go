@@ -160,9 +160,9 @@ func TestRepositoryScrubExpiredTokenDataClearsOldInactivePayloads(t *testing.T) 
 	}
 }
 
-// TestServiceStartFlowWithOptionsReusesActiveIdempotentFlow verifies matching
+// TestServiceStartFlowReusesActiveIdempotentFlow verifies matching
 // active starts share one persisted execution.
-func TestServiceStartFlowWithOptionsReusesActiveIdempotentFlow(t *testing.T) {
+func TestServiceStartFlowReusesActiveIdempotentFlow(t *testing.T) {
 	db := openFlowTestDB(t)
 	if err := AutoMigrate(db); err != nil {
 		t.Fatalf("auto migrate flow tables: %v", err)
@@ -188,7 +188,7 @@ func TestServiceStartFlowWithOptionsReusesActiveIdempotentFlow(t *testing.T) {
 		t.Fatalf("register flow: %v", err)
 	}
 
-	first, err := svc.StartFlowWithOptions(context.Background(), "idempotent-flow", "start-token", StartOptions{
+	first, err := svc.StartFlow(context.Background(), "idempotent-flow", "start-token", StartOptions{
 		IdempotencyKey: "scope:7:image:abc",
 	})
 	if err != nil {
@@ -200,7 +200,7 @@ func TestServiceStartFlowWithOptionsReusesActiveIdempotentFlow(t *testing.T) {
 		t.Fatal("expected first flow to start")
 	}
 
-	second, err := svc.StartFlowWithOptions(context.Background(), "idempotent-flow", "different-token", StartOptions{
+	second, err := svc.StartFlow(context.Background(), "idempotent-flow", "different-token", StartOptions{
 		IdempotencyKey: "scope:7:image:abc",
 	})
 	if err != nil {
@@ -233,9 +233,9 @@ func TestServiceStartFlowWithOptionsReusesActiveIdempotentFlow(t *testing.T) {
 	}
 }
 
-// TestServiceStartFlowWithOptionsDoesNotReuseFailedIdempotentFlow verifies a
+// TestServiceStartFlowDoesNotReuseFailedIdempotentFlow verifies a
 // failed run does not block a fresh request with the same idempotency key.
-func TestServiceStartFlowWithOptionsDoesNotReuseFailedIdempotentFlow(t *testing.T) {
+func TestServiceStartFlowDoesNotReuseFailedIdempotentFlow(t *testing.T) {
 	db := openFlowTestDB(t)
 	if err := AutoMigrate(db); err != nil {
 		t.Fatalf("auto migrate flow tables: %v", err)
@@ -250,7 +250,7 @@ func TestServiceStartFlowWithOptionsDoesNotReuseFailedIdempotentFlow(t *testing.
 	}); err != nil {
 		t.Fatalf("register flow: %v", err)
 	}
-	first, err := svc.StartFlowWithOptions(context.Background(), "failed-idempotent-flow", "first", StartOptions{IdempotencyKey: "retry-key"})
+	first, err := svc.StartFlow(context.Background(), "failed-idempotent-flow", "first", StartOptions{IdempotencyKey: "retry-key"})
 	if err != nil {
 		t.Fatalf("start first flow: %v", err)
 	}
@@ -258,7 +258,7 @@ func TestServiceStartFlowWithOptionsDoesNotReuseFailedIdempotentFlow(t *testing.
 	if first.Status != FlowStatusFailed {
 		t.Fatalf("first flow status = %s, want failed", first.Status)
 	}
-	second, err := svc.StartFlowWithOptions(context.Background(), "failed-idempotent-flow", "second", StartOptions{IdempotencyKey: "retry-key"})
+	second, err := svc.StartFlow(context.Background(), "failed-idempotent-flow", "second", StartOptions{IdempotencyKey: "retry-key"})
 	if err != nil {
 		t.Fatalf("start second flow: %v", err)
 	}
@@ -694,7 +694,7 @@ func TestServicePersistSystemFollowUpIsIdempotentPerTriggerPosition(t *testing.T
 	}
 
 	for attempt := 0; attempt < 2; attempt++ {
-		if err := svc.persistSystemChild(ctx, parent.ID, node.ID, node.NodeIndex, 0, "child", "same-input", nil); err != nil {
+		if err := svc.persistSystemChild(ctx, parent.ID, node.ID, node.NodeIndex, 0, "child", "same-input"); err != nil {
 			t.Fatalf("persist identical follow-up on attempt %d: %v", attempt+1, err)
 		}
 	}
@@ -705,7 +705,7 @@ func TestServicePersistSystemFollowUpIsIdempotentPerTriggerPosition(t *testing.T
 	if len(children) != 1 {
 		t.Fatalf("expected one idempotent system node, got %d", len(children))
 	}
-	if err := svc.persistSystemChild(ctx, parent.ID, node.ID, node.NodeIndex, 0, "other-child", "same-input", nil); err == nil {
+	if err := svc.persistSystemChild(ctx, parent.ID, node.ID, node.NodeIndex, 0, "other-child", "same-input"); err == nil {
 		t.Fatal("expected conflicting replay at the same trigger position to fail")
 	}
 }
@@ -733,10 +733,10 @@ func TestServicePersistSystemChildAllowsFirstChildOfLaterParentNode(t *testing.T
 	if err := repo.CreateNodeInstance(ctx, second); err != nil {
 		t.Fatalf("create second parent node: %v", err)
 	}
-	if err := svc.persistSystemChild(ctx, parent.ID, first.ID, first.NodeIndex, 0, "first-child", "first", nil); err != nil {
+	if err := svc.persistSystemChild(ctx, parent.ID, first.ID, first.NodeIndex, 0, "first-child", "first"); err != nil {
 		t.Fatalf("persist first child: %v", err)
 	}
-	if err := svc.persistSystemChild(ctx, parent.ID, second.ID, second.NodeIndex, 0, "second-child", "second", nil); err != nil {
+	if err := svc.persistSystemChild(ctx, parent.ID, second.ID, second.NodeIndex, 0, "second-child", "second"); err != nil {
 		t.Fatalf("persist first child of later parent node: %v", err)
 	}
 	instance, err := repo.FindFlowInstanceByID(ctx, parent.ID)
@@ -968,7 +968,7 @@ func TestServiceRetryRestartsFailedTriggeredFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build start token: %v", err)
 	}
-	parentExec, err := svc.StartFlowWithMetadata(context.Background(), "retry-parent", startToken, EnsureCorrelationMetadata(nil, "Retry-Test", "Retry-Test"))
+	parentExec, err := svc.StartFlow(context.Background(), "retry-parent", startToken, StartOptions{Metadata: EnsureCorrelationMetadata(nil, "Retry-Test", "Retry-Test")})
 	if err != nil {
 		t.Fatalf("start parent flow: %v", err)
 	}
@@ -1144,7 +1144,6 @@ func waitForFlowInstanceByNameAndStatus(t *testing.T, repo *Repository, name str
 		if err := repo.db.WithContext(context.Background()).
 			Preload("OutputToken").
 			Preload("InputToken").
-			Preload("CallerEndToken").
 			Where("name = ? AND status = ?", name, status).
 			Order("id asc").
 			Find(&instances).Error; err != nil {
@@ -1255,104 +1254,6 @@ func TestServiceActionCanStartAnotherFlow(t *testing.T) {
 	}
 	if systemNode.OutputToken == nil || systemNode.OutputToken.RawData != "start-token-child" {
 		t.Fatalf("unexpected system node output token: %#v", systemNode.OutputToken)
-	}
-}
-
-// TestServiceActionPropagatesCallerEndTokenToFollowUpFlows verifies a parent
-// output token is available to its triggered child flow.
-func TestServiceActionPropagatesCallerEndTokenToFollowUpFlows(t *testing.T) {
-	db := openFlowTestDB(t)
-	if err := AutoMigrate(db); err != nil {
-		t.Fatalf("auto migrate flow tables: %v", err)
-	}
-
-	repo := NewRepository(db)
-	svc := NewService(repo)
-
-	if err := svc.RegisterFlow(Flow{
-		Name: "grandchild",
-		Nodes: []FlowNode{
-			{
-				Name: "grandchild-node",
-				Action: func(ctx context.Context, rawInput string, runtime Runtime) (string, error) {
-					if got := runtime.CallerEndToken(); got != "caller-context" {
-						return "", fmt.Errorf("grandchild caller token = %q, want caller-context", got)
-					}
-					return rawInput + "|" + runtime.CallerEndToken(), nil
-				},
-			},
-		},
-	}); err != nil {
-		t.Fatalf("register grandchild flow: %v", err)
-	}
-
-	if err := svc.RegisterFlow(Flow{
-		Name: "child",
-		Nodes: []FlowNode{
-			{
-				Name: "child-node",
-				Action: func(ctx context.Context, rawInput string, runtime Runtime) (string, error) {
-					if got := runtime.CallerEndToken(); got != "caller-context" {
-						return "", fmt.Errorf("child caller token = %q, want caller-context", got)
-					}
-					if err := runtime.TriggerFlow(ctx, "grandchild", "grand-start"); err != nil {
-						return "", err
-					}
-					return rawInput + "-child", nil
-				},
-			},
-		},
-	}); err != nil {
-		t.Fatalf("register child flow: %v", err)
-	}
-
-	if err := svc.RegisterFlow(Flow{
-		Name: "parent",
-		Nodes: []FlowNode{
-			{
-				Name: "parent-node",
-				Action: func(ctx context.Context, rawInput string, runtime Runtime) (string, error) {
-					if got := runtime.CallerEndToken(); got != "caller-context" {
-						return "", fmt.Errorf("parent caller token = %q, want caller-context", got)
-					}
-					if err := runtime.TriggerFlow(ctx, "child", rawInput); err != nil {
-						return "", err
-					}
-					return rawInput + "-parent", nil
-				},
-			},
-		},
-	}); err != nil {
-		t.Fatalf("register parent flow: %v", err)
-	}
-
-	callerToken := &Token{RawData: "caller-context"}
-	if err := repo.CreateToken(context.Background(), callerToken); err != nil {
-		t.Fatalf("create caller token: %v", err)
-	}
-
-	exec, err := svc.StartFlowLinked(context.Background(), "parent", "start-token", nil, &callerToken.ID)
-	if err != nil {
-		t.Fatalf("start parent flow: %v", err)
-	}
-	waitForDone(t, exec.Done())
-
-	if exec.Status != FlowStatusFinished {
-		t.Fatalf("expected finished parent flow, got %s", exec.Status)
-	}
-
-	child := waitForFlowInstanceByNameAndStatus(t, repo, "child", FlowStatusFinished)
-	if child.CallerEndToken == nil || child.CallerEndToken.RawData != "caller-context" {
-		t.Fatalf("unexpected child caller token: %#v", child.CallerEndToken)
-	}
-
-	grandchild := waitForFlowInstanceByNameAndStatus(t, repo, "grandchild", FlowStatusFinished)
-	if grandchild.CallerEndToken == nil || grandchild.CallerEndToken.RawData != "caller-context" {
-		t.Fatalf("unexpected grandchild caller token: %#v", grandchild.CallerEndToken)
-	}
-
-	if grandchild.OutputToken == nil || grandchild.OutputToken.RawData != "grand-start|caller-context" {
-		t.Fatalf("unexpected grandchild output token: %#v", grandchild.OutputToken)
 	}
 }
 

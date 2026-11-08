@@ -82,7 +82,6 @@ func (r *Repository) ScrubExpiredTokenData(ctx context.Context, cutoff time.Time
 		      AND (
 		        input_token_id = tokens.id
 		        OR output_token_id = tokens.id
-		        OR caller_end_token_id = tokens.id
 		      )
 		  )
 		  AND NOT EXISTS (
@@ -92,7 +91,6 @@ func (r *Repository) ScrubExpiredTokenData(ctx context.Context, cutoff time.Time
 		      AND (
 		        input_token_id = tokens.id
 		        OR output_token_id = tokens.id
-		        OR caller_end_token_id = tokens.id
 		      )
 		  )
 	`, cutoff.UTC(), FlowStatusRunning, FlowStatusWaiting, FlowStatusStopped, NodeStatusQueued, NodeStatusRunning)
@@ -153,7 +151,6 @@ func (r *Repository) FindFlowInstanceSummaryByID(ctx context.Context, id uint) (
 	err := r.db.WithContext(ctx).
 		Preload("InputToken").
 		Preload("OutputToken").
-		Preload("CallerEndToken").
 		First(&instance, id).Error
 	if err == nil {
 		normalizeLoadedFlowInstance(&instance)
@@ -182,7 +179,6 @@ func (r *Repository) FindNodeInstanceByID(ctx context.Context, id uint) (NodeIns
 	err := r.db.WithContext(ctx).
 		Preload("InputToken").
 		Preload("OutputToken").
-		Preload("CallerEndToken").
 		Preload("FlowInstance").
 		First(&node, id).Error
 	if err == nil {
@@ -205,7 +201,6 @@ func (r *Repository) ListQueuedSystemNodes(ctx context.Context, limit int) ([]No
 	err := r.db.WithContext(ctx).
 		Preload("InputToken").
 		Preload("OutputToken").
-		Preload("CallerEndToken").
 		Preload("FlowInstance").
 		Where("system_node = ? AND status IN ?", true, []NodeStatus{NodeStatusQueued, NodeStatusRunning}).
 		Order("updated_at asc").
@@ -224,7 +219,6 @@ func (r *Repository) ListQueuedSystemNodesByFlowInstance(ctx context.Context, fl
 	err := r.db.WithContext(ctx).
 		Preload("InputToken").
 		Preload("OutputToken").
-		Preload("CallerEndToken").
 		Preload("FlowInstance").
 		Where("flow_instance_id = ? AND system_node = ? AND status = ?", flowInstanceID, true, NodeStatusQueued).
 		Order("node_index asc").
@@ -386,7 +380,6 @@ func normalizeLoadedFlowInstance(instance *FlowInstance) {
 	}
 	normalizeLoadedToken(instance.InputToken)
 	normalizeLoadedToken(instance.OutputToken)
-	normalizeLoadedToken(instance.CallerEndToken)
 	for index := range instance.NodeInstances {
 		normalizeLoadedNodeInstance(&instance.NodeInstances[index])
 	}
@@ -399,7 +392,6 @@ func normalizeLoadedNodeInstance(node *NodeInstance) {
 	}
 	normalizeLoadedToken(node.InputToken)
 	normalizeLoadedToken(node.OutputToken)
-	normalizeLoadedToken(node.CallerEndToken)
 }
 
 // normalizeLoadedNodeInstances normalizes each node in a loaded result set.
@@ -427,7 +419,6 @@ func (r *Repository) flowQuery(ctx context.Context) *gorm.DB {
 	return r.db.WithContext(ctx).
 		Preload("InputToken").
 		Preload("OutputToken").
-		Preload("CallerEndToken").
 		Preload("NodeInstances", func(tx *gorm.DB) *gorm.DB {
 			return tx.Order("node_index asc")
 		}).
