@@ -14,19 +14,9 @@ type StartRequest struct {
 type StartFlowNext func(ctx context.Context, request StartRequest) (*FlowExecutionContext, error)
 
 // StartMiddleware can modify a workflow start or return an execution directly
-// without starting a new flow. Call next to continue the chain. A middleware
-// that allocates resources during Start can also implement
-// StartMiddlewareRollback to clean them up if starting fails synchronously.
+// without starting a new flow. Call next to continue the chain.
 type StartMiddleware interface {
 	Start(ctx context.Context, request StartRequest, next StartFlowNext) (*FlowExecutionContext, error)
-}
-
-// StartMiddlewareRollback is an optional interface for middleware that needs
-// to undo setup when the start chain or the synchronous workflow start fails.
-// RollbackStart is called in reverse middleware order. It is not called for
-// errors that occur later while the workflow is executing.
-type StartMiddlewareRollback interface {
-	RollbackStart(ctx context.Context, request StartRequest, startErr error) error
 }
 
 // StartMiddlewareFunc adapts a function to the StartMiddleware interface.
@@ -36,3 +26,27 @@ type StartMiddlewareFunc func(ctx context.Context, request StartRequest, next St
 func (f StartMiddlewareFunc) Start(ctx context.Context, request StartRequest, next StartFlowNext) (*FlowExecutionContext, error) {
 	return f(ctx, request, next)
 }
+
+// NewSequencedStartMiddleware assigns an ordering sequence to middleware.
+// StartFlow sorts engine, flow-definition, and per-call middleware together
+// in ascending sequence order. Middleware without an explicit sequence uses 0;
+// ties retain their source order (engine, flow definition, then per-call).
+func NewSequencedStartMiddleware(sequence int, middleware StartMiddleware) StartMiddleware {
+	if middleware == nil {
+		return nil
+	}
+	return sequencedStartMiddleware{sequence: sequence, middleware: middleware}
+}
+
+type sequencedStartMiddleware struct {
+	sequence   int
+	middleware StartMiddleware
+}
+
+func (m sequencedStartMiddleware) Start(ctx context.Context, request StartRequest, next StartFlowNext) (*FlowExecutionContext, error) {
+	return m.middleware.Start(ctx, request, next)
+}
+
+func (m sequencedStartMiddleware) Sequence() int { return m.sequence }
+
+func (m sequencedStartMiddleware) UnwrapStartMiddleware() StartMiddleware { return m.middleware }
