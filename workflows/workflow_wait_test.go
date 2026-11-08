@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/wswag/go-flow/tokens"
 )
 
 // TestWaitForWorkflowReturnsTerminalResultSetsImmediately verifies completed
@@ -16,7 +18,7 @@ func TestWaitForWorkflowReturnsTerminalResultSetsImmediately(t *testing.T) {
 	}
 	repo := NewRepository(db)
 	svc := NewService(repo)
-	token, err := BuildTokenPayload(map[string]any{"example.result": map[string]string{"title": "Fertig"}}, map[string]any{"source": "test"})
+	token, err := tokens.BuildTokenPayload(map[string]any{"example.result": map[string]string{"title": "Fertig"}}, map[string]any{"source": "test"})
 	if err != nil {
 		t.Fatal(err)
 	}

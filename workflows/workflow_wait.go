@@ -6,6 +6,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/wswag/go-flow/tokens"
 )
 
 // DefaultWorkflowWaitTimeout begrenzt einen einzelnen Long-Poll-Aufruf. Ein
@@ -106,7 +108,7 @@ func (s *Service) workflowWaitSnapshot(ctx context.Context, workflowID uint, sup
 	if instance.OutputToken == nil || strings.TrimSpace(instance.OutputToken.RawData) == "" {
 		return result, nil
 	}
-	payload, err := ParseTokenPayload(instance.OutputToken.RawData)
+	payload, err := tokens.ParseTokenPayload(instance.OutputToken.RawData)
 	if err != nil {
 		return WorkflowWaitResult{}, err
 	}

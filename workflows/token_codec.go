@@ -23,6 +23,3 @@ func (t *Token) AfterFind(_ *gorm.DB) error {
 	}
 	return err
 }
-
-func encodeTokenRawData(raw string) (string, error) { return tokens.Encode(raw) }
-func decodeTokenRawData(raw string) (string, error) { return tokens.Decode(raw) }

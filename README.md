@@ -58,6 +58,47 @@ if err != nil {
 parsed, err := tokens.ParseTokenPayload(payload)
 ```
 
+### Fluent token access
+
+`TokenBuilder` and `TokenReader` provide a fluent API for creating, reading,
+and updating payloads. `EditableSet` selects the set through
+`admin.editable_set`; `EditableValue` replaces that set's value, while
+`MergeEditableValue` shallow-merges fields into an object set (incoming fields
+win on name conflicts).
+
+```go
+import "github.com/wswag/go-flow/tokens"
+
+func updateToken(raw string) (string, error) {
+	if raw == "" {
+		var err error
+		raw, err = tokens.NewTokenBuilder().
+			Set("request", map[string]any{"text": "hello", "status": "new"}).
+			EditableSet("request").
+			Build()
+		if err != nil {
+			return "", err
+		}
+	}
+
+	reader := tokens.NewTokenReader(raw)
+	if err := reader.Err(); err != nil {
+		return "", err
+	}
+
+	return tokens.NewTokenBuilderFrom(raw).
+		EditableSet(reader.EditableSet()).
+		MergeEditableValue(map[string]any{"status": "ready"}).
+		Build()
+}
+```
+
+Use `EditableValue` instead of `MergeEditableValue` to replace the entire
+selected set. For typed reads, call `reader.Decode("request", &request)`; use
+`reader.DecodeMetaSet("admin.editable_set", &request)` to resolve the set key
+from metadata and decode it in one step. `TokenReader` parses once; check
+`Err()` before reading when the input may be invalid.
+
 ## Assistant example
 
 ```go

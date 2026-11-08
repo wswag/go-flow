@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wswag/go-flow/tokens"
+
 	"gorm.io/gorm"
 )
 
@@ -413,7 +415,7 @@ func normalizeLoadedToken(token *Token) {
 	if token == nil {
 		return
 	}
-	decoded, err := decodeTokenRawData(token.RawData)
+	decoded, err := tokens.Decode(token.RawData)
 	if err != nil {
 		return
 	}

@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wswag/go-flow/tokens"
+
 	"gorm.io/gorm"
 )
 
@@ -550,7 +552,7 @@ func (s *Service) RetryFlowInstance(ctx context.Context, flowInstanceID uint, no
 	if selectedCheckpoint || node.NodeIndex == startNodeIndex {
 		setKey = strings.TrimSpace(setKey)
 		if setKey != "" {
-			startToken, err = RewriteTokenPayloadSet(startToken, setKey, strings.TrimSpace(value))
+			startToken, err = tokens.RewriteTokenPayloadSet(startToken, setKey, strings.TrimSpace(value))
 		} else {
 			startToken, err = rewritePrimaryTokenPayloadSet(startToken, value)
 		}
@@ -798,12 +800,12 @@ func (s *Service) updateCurrentNodeStartToken(ctx context.Context, flowInstanceI
 		beforeValue := ""
 		var updatedRaw string
 		if setKey != "" {
-			payload, parseErr := ParseTokenPayload(inputToken.RawData)
+			payload, parseErr := tokens.ParseTokenPayload(inputToken.RawData)
 			if parseErr != nil {
 				return parseErr
 			}
-			beforeValue = TokenPayloadSetString(payload, setKey)
-			updatedRaw, err = RewriteTokenPayloadSet(inputToken.RawData, setKey, strings.TrimSpace(value))
+			beforeValue = tokens.TokenPayloadSetString(payload, setKey)
+			updatedRaw, err = tokens.RewriteTokenPayloadSet(inputToken.RawData, setKey, strings.TrimSpace(value))
 		} else {
 			beforeValue = workflowTokenEditableValue(inputToken.RawData)
 			updatedRaw, err = rewritePrimaryTokenPayloadSet(inputToken.RawData, value)
@@ -922,29 +924,29 @@ func (s *Service) updateCurrentNodeStartToken(ctx context.Context, flowInstanceI
 // workflowTokenEditableValue returns the primary editable set's value, or the
 // original token text when the payload has no editable set.
 func workflowTokenEditableValue(raw string) string {
-	payload, err := ParseTokenPayload(raw)
+	payload, err := tokens.ParseTokenPayload(raw)
 	if err != nil {
 		return strings.TrimSpace(raw)
 	}
-	key := TokenPayloadPrimarySet(payload)
+	key := tokens.TokenPayloadPrimarySet(payload)
 	if key == "" {
 		return strings.TrimSpace(raw)
 	}
-	return TokenPayloadSetString(payload, key)
+	return tokens.TokenPayloadSetString(payload, key)
 }
 
 // rewritePrimaryTokenPayloadSet updates the set selected by the payload's
 // primary editable-set metadata.
 func rewritePrimaryTokenPayloadSet(raw string, value string) (string, error) {
-	payload, err := ParseTokenPayload(raw)
+	payload, err := tokens.ParseTokenPayload(raw)
 	if err != nil {
 		return "", err
 	}
-	key := TokenPayloadPrimarySet(payload)
+	key := tokens.TokenPayloadPrimarySet(payload)
 	if key == "" {
 		return "", errors.New("token payload has no primary editable set")
 	}
-	return RewriteTokenPayloadSet(raw, key, strings.TrimSpace(value))
+	return tokens.RewriteTokenPayloadSet(raw, key, strings.TrimSpace(value))
 }
 
 // DiscardFlowInstance markiert einen fehlgeschlagenen Flow als verworfen.
@@ -1476,7 +1478,7 @@ func (s *Service) prepareNodeForExecution(ctx context.Context, instance FlowInst
 		if current.InputToken == nil {
 			return fmt.Errorf("flow %q node %q is missing its input token", flow.Name, current.Name)
 		}
-		decodedInput, decodeErr := decodeTokenRawData(current.InputToken.RawData)
+		decodedInput, decodeErr := tokens.Decode(current.InputToken.RawData)
 		if decodeErr != nil {
 			return decodeErr
 		}
