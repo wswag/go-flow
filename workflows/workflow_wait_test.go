@@ -1,4 +1,4 @@
-package flow
+package workflows
 
 import (
 	"context"
@@ -104,7 +104,7 @@ func TestWaitingParentFailsWhenChildActionFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	exec, err := svc.StartFlow(context.Background(), "waiting-parent", "input")
+	exec, err := svc.StartFlow(context.Background(), "waiting-parent", testEditablePayload(t, "input"))
 	if err != nil {
 		t.Fatal(err)
 	}

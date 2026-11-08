@@ -1,4 +1,4 @@
-package flow
+package workflows
 
 import (
 	"context"
@@ -187,7 +187,7 @@ func TestServiceStartFlowWithOptionsReusesActiveIdempotentFlow(t *testing.T) {
 	}
 
 	first, err := svc.StartFlowWithOptions(context.Background(), "idempotent-flow", "start-token", StartOptions{
-		IdempotencyKey: "household:7:image:abc",
+		IdempotencyKey: "scope:7:image:abc",
 	})
 	if err != nil {
 		t.Fatalf("start first flow: %v", err)
@@ -199,7 +199,7 @@ func TestServiceStartFlowWithOptionsReusesActiveIdempotentFlow(t *testing.T) {
 	}
 
 	second, err := svc.StartFlowWithOptions(context.Background(), "idempotent-flow", "different-token", StartOptions{
-		IdempotencyKey: "household:7:image:abc",
+		IdempotencyKey: "scope:7:image:abc",
 	})
 	if err != nil {
 		t.Fatalf("start second flow: %v", err)
@@ -222,7 +222,7 @@ func TestServiceStartFlowWithOptionsReusesActiveIdempotentFlow(t *testing.T) {
 
 	var count int64
 	if err := repo.db.WithContext(context.Background()).Model(&FlowInstance{}).
-		Where("name = ? AND idempotency_key = ?", "idempotent-flow", "household:7:image:abc").
+		Where("name = ? AND idempotency_key = ?", "idempotent-flow", "scope:7:image:abc").
 		Count(&count).Error; err != nil {
 		t.Fatalf("count flows: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestServiceRetryFlowInstanceStartsFreshRunAndSupersedesFailure(t *testing.T
 	}); err != nil {
 		t.Fatalf("register flow: %v", err)
 	}
-	first, err := svc.StartFlow(context.Background(), "fresh-retry-flow", "original")
+	first, err := svc.StartFlow(context.Background(), "fresh-retry-flow", testEditablePayload(t, "original"))
 	if err != nil {
 		t.Fatalf("start first flow: %v", err)
 	}
@@ -318,8 +318,9 @@ func TestServiceRetryFlowInstanceStartsFreshRunAndSupersedesFailure(t *testing.T
 	if updatedFailed.DiscardedAt == nil {
 		t.Fatal("superseded failed flow is still visible")
 	}
-	if retried.StartToken != "edited" {
-		t.Fatalf("retried start token = %q, want edited", retried.StartToken)
+	payload, err := ParseTokenPayload(retried.StartToken)
+	if err != nil || TokenPayloadSetString(payload, "value") != "edited" {
+		t.Fatalf("retried start token = %q, want edited value (error: %v)", retried.StartToken, err)
 	}
 }
 
@@ -334,13 +335,14 @@ func TestServiceRetryFlowInstanceReusesPersistedCheckpointWithoutRerunningPrevio
 	svc := NewService(repo)
 	var generationAttempts atomic.Int32
 	var checkpointAttempts atomic.Int32
+	generated := testEditablePayload(t, "persisted-generation")
 	if err := svc.RegisterFlow(Flow{
 		Name:           "checkpoint-retry-flow",
 		RetryNodeNames: []string{"apply"},
 		Nodes: []FlowNode{
 			{Name: "generate", Action: func(_ context.Context, _ string, _ Runtime) (string, error) {
 				generationAttempts.Add(1)
-				return "persisted-generation", nil
+				return generated, nil
 			}},
 			{Name: "apply", Action: func(_ context.Context, rawInput string, _ Runtime) (string, error) {
 				if checkpointAttempts.Add(1) == 1 {
@@ -375,6 +377,10 @@ func TestServiceRetryFlowInstanceReusesPersistedCheckpointWithoutRerunningPrevio
 	waitForDone(t, retried.Done())
 	if retried.Status != FlowStatusFinished {
 		t.Fatalf("retried flow status = %s, want finished", retried.Status)
+	}
+	payload, err := ParseTokenPayload(retried.StartToken)
+	if err != nil || TokenPayloadSetString(payload, "value") != "ignored-downstream-edit" {
+		t.Fatalf("retried checkpoint token = %q, want edited value (error: %v)", retried.StartToken, err)
 	}
 	if generationAttempts.Load() != 1 {
 		t.Fatalf("generation attempts = %d, want one persisted generation", generationAttempts.Load())
@@ -422,7 +428,7 @@ func TestRepositoryTreatsWaitingFlowAsResumableAndActive(t *testing.T) {
 	instance := &FlowInstance{
 		Name:           "waiting-flow",
 		Status:         FlowStatusWaiting,
-		IdempotencyKey: "household:7",
+		IdempotencyKey: "scope:7",
 		StartedAt:      now,
 		UpdatedAt:      now,
 	}
@@ -819,14 +825,14 @@ func TestServiceFindLatestFlowByNameAndCorrelationIDReturnsNewestMatch(t *testin
 	first := FlowInstance{
 		Name:         "inventory_photo_import",
 		Status:       FlowStatusFinished,
-		MetadataJSON: `{"correlationId":"corr-1","householdId":7}`,
+		MetadataJSON: `{"correlationId":"corr-1","scopeId":7}`,
 		StartedAt:    now.Add(-2 * time.Hour),
 		UpdatedAt:    now.Add(-2 * time.Hour),
 	}
 	second := FlowInstance{
 		Name:         "inventory_photo_import",
 		Status:       FlowStatusFinished,
-		MetadataJSON: `{"correlationId":"corr-1","householdId":7}`,
+		MetadataJSON: `{"correlationId":"corr-1","scopeId":7}`,
 		StartedAt:    now.Add(-time.Hour),
 		UpdatedAt:    now.Add(-time.Hour),
 	}
@@ -1016,6 +1022,15 @@ func TestServiceRetryRestartsFailedTriggeredFlow(t *testing.T) {
 	}
 }
 
+func testEditablePayload(t *testing.T, value string) string {
+	t.Helper()
+	payload, err := BuildTokenPayload(map[string]any{"value": value}, map[string]any{"admin.primary_set": "value"})
+	if err != nil {
+		t.Fatalf("build token payload: %v", err)
+	}
+	return payload
+}
+
 // openFlowTestDB creates an isolated SQLite database for repository tests.
 func openFlowTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
@@ -1025,6 +1040,12 @@ func openFlowTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open sqlite db: %v", err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get sqlite connection pool: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = sqlDB.Close() })
 	return db
 }
 
