@@ -144,11 +144,11 @@ type CorrelationWorkflowStatus struct {
 
 // CorrelationFailureHook verarbeitet terminale Fehler einer Workflow-Correlation.
 // Der Hook darf keine fachlichen Annahmen über den konkreten Flow treffen.
-type CorrelationFailureHook func(context.Context, CorrelationFailureEvent)
+type CorrelationFailureHook func(context.Context, *Service, CorrelationFailureEvent)
 
 // TerminalHook beobachtet einen bereits persistent abgeschlossenen Workflow.
 // Fehler im Hook dürfen den Abschluss des Workflows nicht verändern.
-type TerminalHook func(context.Context, FlowEvent)
+type TerminalHook func(context.Context, *Service, FlowEvent)
 
 // FlowEvent beschreibt einen live gemeldeten Workflow-Schritt für Ticker und Banner.
 type FlowEvent struct {

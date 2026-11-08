@@ -1259,8 +1259,46 @@ func (s *Service) broadcastTerminal(ctx context.Context, event FlowEvent) {
 	hooks := append([]TerminalHook(nil), s.terminalHooks...)
 	s.mu.RUnlock()
 	for _, hook := range hooks {
-		hook(context.WithoutCancel(ctx), event)
+		hook(context.WithoutCancel(ctx), s, event)
 	}
+}
+
+// FlowStartToken returns the raw input token supplied when a flow instance
+// started. The returned token can be decoded with the generic helpers in the
+// tokens package.
+func (s *Service) FlowStartToken(ctx context.Context, flowInstanceID uint) (string, error) {
+	if s == nil || s.store == nil {
+		return "", errors.New("flow store is not configured")
+	}
+	instance, err := s.store.FindFlowInstanceByID(ctx, flowInstanceID)
+	if err != nil {
+		return "", err
+	}
+	if instance.InputToken == nil {
+		return "", fmt.Errorf("flow instance %d has no start token", flowInstanceID)
+	}
+	return instance.InputToken.RawData, nil
+}
+
+// DecodeFlowStartTokenSet decodes a named set from a flow instance's start
+// token. Use DecodeFlowStartTokenMetaSet when the set name is stored in token
+// metadata.
+func (s *Service) DecodeFlowStartTokenSet(ctx context.Context, flowInstanceID uint, setKey string, target any) error {
+	raw, err := s.FlowStartToken(ctx, flowInstanceID)
+	if err != nil {
+		return err
+	}
+	return tokens.DecodeTokenPayloadSet(raw, setKey, target)
+}
+
+// DecodeFlowStartTokenMetaSet decodes the set whose name is referenced by the
+// given metadata key in a flow instance's start token.
+func (s *Service) DecodeFlowStartTokenMetaSet(ctx context.Context, flowInstanceID uint, metaKey string, target any) error {
+	raw, err := s.FlowStartToken(ctx, flowInstanceID)
+	if err != nil {
+		return err
+	}
+	return tokens.DecodeTokenPayloadMetaSet(raw, metaKey, target)
 }
 
 // runtimeFor builds the per-node runtime supplied to an action.
@@ -1785,7 +1823,7 @@ func (s *Service) broadcastCorrelationFailure(ctx context.Context, event FlowEve
 	failed.StartedAt = correlationStart
 	failed.FailedAt = event.UpdatedAt
 	for _, hook := range hooks {
-		hook(ctx, failed)
+		hook(ctx, s, failed)
 	}
 }
 
