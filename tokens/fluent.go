@@ -50,6 +50,19 @@ func (b *TokenBuilder) Set(key string, value any) *TokenBuilder {
 	return b
 }
 
+// SetResult stores a node's output for the next node, or the flow's final
+// result when called by the last node.
+func (b *TokenBuilder) SetResult(value any) *TokenBuilder {
+	return b.Set(TokenSetFlowResult, value)
+}
+
+// SetState stores information that is needed across nodes. If any of that
+// information is part of the flow's result, the last node must also write it
+// with SetResult.
+func (b *TokenBuilder) SetState(value any) *TokenBuilder {
+	return b.Set(TokenSetFlowState, value)
+}
+
 // Meta adds or replaces a metadata entry.
 func (b *TokenBuilder) Meta(key string, value any) *TokenBuilder {
 	key = strings.TrimSpace(key)
@@ -224,6 +237,19 @@ func (r *TokenReader) Decode(key string, target any) error {
 		return r.err
 	}
 	return decodeTokenPayloadSet(r.payload, key, target)
+}
+
+// Result decodes the previous node's output, or the flow's final result, into
+// target.
+func (r *TokenReader) Result(target any) error {
+	return r.Decode(TokenSetFlowResult, target)
+}
+
+// State decodes information carried across nodes into target. To make any of
+// that information part of the flow's result, the last node must write it with
+// SetResult.
+func (r *TokenReader) State(target any) error {
+	return r.Decode(TokenSetFlowState, target)
 }
 
 // DecodeMetaSet resolves a set key from metadata and decodes that set into
