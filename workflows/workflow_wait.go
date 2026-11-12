@@ -44,6 +44,18 @@ func (r WorkflowWaitResult) Result(target any) error {
 	return nil
 }
 
+// Error decodes the flow.error set into target.
+func (r WorkflowWaitResult) Error(target any) error {
+	raw, ok := r.ResultSets[tokens.TokenSetFlowError]
+	if !ok {
+		return errors.New("workflow error details are missing")
+	}
+	if err := json.Unmarshal(raw, target); err != nil {
+		return fmt.Errorf("decode workflow error details: %w", err)
+	}
+	return nil
+}
+
 // WaitForWorkflow wartet bis ein einzelner Lauf nicht mehr aktiv ist oder das
 // Timeout erreicht. Running und Waiting sind aktiv, weil ein wartender Parent
 // weiterhin auf seine Child-Flows wartet.
