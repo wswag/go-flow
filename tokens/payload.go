@@ -23,14 +23,14 @@ const (
 	tokenPayloadEditableSetMetaKey = "admin.editable_set"
 )
 
-// TokenSetFlowResult is the named token set used for a flow result.
-const TokenSetFlowResult = "flow.result"
+// TokenSetResult is the named token set used for a result.
+const TokenSetResult = "result"
 
-// TokenSetFlowState is the named token set used for a flow state.
-const TokenSetFlowState = "flow.state"
+// TokenSetState is the named token set used for state.
+const TokenSetState = "state"
 
-// TokenSetFlowError is the named token set used for a flow error.
-const TokenSetFlowError = "flow.error"
+// TokenSetError is the named token set used for error details.
+const TokenSetError = "error"
 
 // TokenMetaType is the metadata key that identifies a token's type.
 const TokenMetaType = "token_type"

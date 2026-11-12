@@ -207,7 +207,7 @@ func TestRuntimeNewTokenBuilderUsesCurrentFlowAndNode(t *testing.T) {
 		t.Fatalf("token type = %q, want %q", got, FlowTokenTypeNode)
 	}
 	var state map[string]string
-	if err := reader.DecodeMetaSet(TokenMetaFlowStateSet, &state); err != nil {
+	if err := reader.State(&state); err != nil {
 		t.Fatalf("decode state set: %v", err)
 	}
 	if state["value"] != "ready" {

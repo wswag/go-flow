@@ -616,9 +616,8 @@ func (s *Service) ResumeFlowInstance(ctx context.Context, flowInstanceID uint) (
 //
 // Reusing the failed instance is only safe when all side effects before the
 // current checkpoint are still present. Some workflows compensate those
-// effects when a downstream branch fails (the meal-plan workflow is one
-// example). A fresh run therefore starts at the workflow's configured
-// persisted checkpoint, reusing the already generated input token.
+// effects when a downstream branch fails. A fresh run therefore starts at the
+// configured persisted checkpoint, reusing the already generated input token.
 func (s *Service) RetryFlowInstance(ctx context.Context, flowInstanceID uint, nodeID uint, setKey string, value string) (*FlowExecutionContext, error) {
 	if s == nil || s.store == nil {
 		return nil, errors.New("flow store is not configured")
@@ -1444,8 +1443,6 @@ func (s *Service) buildFlowEvent(instance FlowInstance, flow Flow, node *NodeIns
 		StepDescription:        stepDescription,
 		Message:                strings.TrimSpace(message),
 		ErrorMessage:           errorMessageFrom(execErr),
-		HouseholdID:            meta.HouseholdID,
-		UserID:                 meta.UserID,
 		UpdatedAt:              instance.UpdatedAt,
 		CreatedAt:              instance.StartedAt,
 		TotalSteps:             totalSteps,
@@ -1938,8 +1935,6 @@ func parseFlowMetadata(raw string) workflowMetadata {
 		return meta
 	}
 	_ = json.Unmarshal([]byte(raw), &meta.Raw)
-	meta.HouseholdID = metadataUint(meta.Raw["householdId"])
-	meta.UserID = metadataUint(meta.Raw["userId"])
 	meta.CorrelationID = metadataString(meta.Raw[metadataCorrelationIDKey])
 	meta.CorrelationLabel = metadataString(meta.Raw[metadataCorrelationLabelKey])
 	meta.CorrelationDescription = metadataString(meta.Raw[metadataCorrelationDescriptionKey])
@@ -1958,8 +1953,6 @@ func flowNodeContext(metadataJSON string) context.Context {
 
 type workflowMetadata struct {
 	Raw                    map[string]any
-	HouseholdID            uint
-	UserID                 uint
 	CorrelationID          string
 	CorrelationLabel       string
 	CorrelationDescription string

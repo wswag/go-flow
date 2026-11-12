@@ -59,7 +59,7 @@ type FlowNode struct {
 // für Folge-Workflows nutzen darf.
 type Runtime interface {
 	// NewTokenBuilder creates a workflow token builder tagged with the current
-	// flow and node names. A non-nil state is stored as flow.state_set.
+	// flow and node names. A non-nil state is stored in the "state" set.
 	NewTokenBuilder(state any) *tokens.TokenBuilder
 	CurrentEvent() FlowEvent
 	TriggerFlow(ctx context.Context, name string, startToken string) error
@@ -186,8 +186,6 @@ type FlowEvent struct {
 	StepDescription        string          `json:"stepDescription"`
 	Message                string          `json:"message,omitempty"`
 	ErrorMessage           string          `json:"errorMessage,omitempty"`
-	HouseholdID            uint            `json:"householdId,omitempty"`
-	UserID                 uint            `json:"userId,omitempty"`
 	UpdatedAt              time.Time       `json:"updatedAt"`
 	CreatedAt              time.Time       `json:"createdAt,omitempty"`
 	TotalSteps             int             `json:"totalSteps"`

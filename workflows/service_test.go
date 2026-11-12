@@ -943,7 +943,7 @@ func TestTerminalHookCanDecodeStartTokenSetThroughService(t *testing.T) {
 	hookErr := make(chan error, 1)
 	svc.RegisterTerminalHook(func(ctx context.Context, engine *Service, event FlowEvent) {
 		var decoded state
-		err := engine.DecodeFlowStartTokenMetaSet(ctx, event.FlowInstanceID, TokenMetaFlowStateSet, &decoded)
+		err := engine.DecodeFlowStartTokenSet(ctx, event.FlowInstanceID, tokens.TokenSetState, &decoded)
 		if err != nil {
 			hookErr <- err
 			return
