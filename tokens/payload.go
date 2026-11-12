@@ -29,6 +29,9 @@ const TokenSetFlowResult = "flow.result"
 // TokenSetFlowState is the named token set used for a flow state.
 const TokenSetFlowState = "flow.state"
 
+// TokenSetFlowError is the named token set used for a flow error.
+const TokenSetFlowError = "flow.error"
+
 // TokenMetaType is the metadata key that identifies a token's type.
 const TokenMetaType = "token_type"
 
