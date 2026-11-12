@@ -211,7 +211,7 @@ independent application-owned access metadata.
 
 ```go
 runKey, err := service.NewRun(ctx, "onboarding", assistants.StateKey{
-	ScopeKey: "household:12",
+	ScopeKey: "organization:12",
 	ActorKey: "anonymous",
 }, "draft:requested-by-app", tokenHash, assistants.NewRunOptions{
 	DiscardOpen: true,

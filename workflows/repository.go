@@ -354,24 +354,6 @@ func (r *Repository) listFlowInstanceSummariesByCorrelationID(ctx context.Contex
 	return items, err
 }
 
-// CountFlowInstancesByNameAndHouseholdIDAndStatus zählt persistierte Workflow-Läufe
-// für einen konkreten Haushalt und Status.
-func (r *Repository) CountFlowInstancesByNameAndHouseholdIDAndStatus(ctx context.Context, name string, householdID uint, status FlowStatus) (int64, error) {
-	if r == nil || r.db == nil {
-		return 0, errInvalidRepository
-	}
-	if householdID == 0 {
-		return 0, nil
-	}
-	var count int64
-	err := r.db.WithContext(ctx).
-		Model(&FlowInstance{}).
-		Where("name = ? AND status = ?", strings.TrimSpace(name), status).
-		Where("metadata_json IS NOT NULL AND trim(metadata_json) <> '' AND json_valid(metadata_json) AND json_extract(metadata_json, '$.householdId') = ?", householdID).
-		Count(&count).Error
-	return count, err
-}
-
 // normalizeLoadedFlowInstance repairs optional associations on a loaded flow
 // so callers can traverse them without nil checks.
 func normalizeLoadedFlowInstance(instance *FlowInstance) {

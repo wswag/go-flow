@@ -31,10 +31,10 @@ type WorkflowWaitResult struct {
 	ResultSets map[string]json.RawMessage `json:"resultSets"`
 }
 
-// Result decodes the flow.result set into target. The final node must write
+// Result decodes the result set into target. The final node must write
 // the flow result with TokenBuilder.SetResult for it to be available here.
 func (r WorkflowWaitResult) Result(target any) error {
-	raw, ok := r.ResultSets[tokens.TokenSetFlowResult]
+	raw, ok := r.ResultSets[tokens.TokenSetResult]
 	if !ok {
 		return errors.New("workflow result is missing")
 	}
@@ -44,9 +44,9 @@ func (r WorkflowWaitResult) Result(target any) error {
 	return nil
 }
 
-// Error decodes the flow.error set into target.
+// Error decodes the error set into target.
 func (r WorkflowWaitResult) Error(target any) error {
-	raw, ok := r.ResultSets[tokens.TokenSetFlowError]
+	raw, ok := r.ResultSets[tokens.TokenSetError]
 	if !ok {
 		return errors.New("workflow error details are missing")
 	}
