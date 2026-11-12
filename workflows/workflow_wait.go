@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -28,6 +29,19 @@ type WorkflowWaitResult struct {
 	Status     FlowStatus                 `json:"status"`
 	Metadata   map[string]any             `json:"metadata"`
 	ResultSets map[string]json.RawMessage `json:"resultSets"`
+}
+
+// Result decodes the flow.result set into target. The final node must write
+// the flow result with TokenBuilder.SetResult for it to be available here.
+func (r WorkflowWaitResult) Result(target any) error {
+	raw, ok := r.ResultSets[tokens.TokenSetFlowResult]
+	if !ok {
+		return errors.New("workflow result is missing")
+	}
+	if err := json.Unmarshal(raw, target); err != nil {
+		return fmt.Errorf("decode workflow result: %w", err)
+	}
+	return nil
 }
 
 // WaitForWorkflow wartet bis ein einzelner Lauf nicht mehr aktiv ist oder das
