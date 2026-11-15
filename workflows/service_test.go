@@ -287,7 +287,12 @@ func TestServiceRetryFlowStartsFreshRunAndSupersedesFailure(t *testing.T) {
 			if attempts.Add(1) == 1 {
 				return "", errors.New("first attempt failed")
 			}
-			return rawInput + "-ok", nil
+			reader := tokens.NewTokenReader(rawInput)
+			var input string
+			if err := reader.Input(&input); err != nil {
+				return "", err
+			}
+			return tokens.NewTokenBuilder().SetResult(input + "-ok").Build()
 		}}},
 	}); err != nil {
 		t.Fatalf("register flow: %v", err)
@@ -304,7 +309,7 @@ func TestServiceRetryFlowStartsFreshRunAndSupersedesFailure(t *testing.T) {
 	if failed.Status != FlowStatusFailed || len(failed.NodeInstances) != 1 {
 		t.Fatalf("failed flow state = status %s nodes %d", failed.Status, len(failed.NodeInstances))
 	}
-	retried, err := svc.RetryFlow(context.Background(), FlowRef(failed.ID), failed.NodeInstances[0].ID, "", "edited")
+	retried, err := svc.RetryFlow(context.Background(), FlowRef(failed.ID), failed.NodeInstances[0].ID, tokens.TokenSetInput, "edited")
 	if err != nil {
 		t.Fatalf("retry flow: %v", err)
 	}
@@ -326,8 +331,9 @@ func TestServiceRetryFlowStartsFreshRunAndSupersedesFailure(t *testing.T) {
 	if updatedFailed.DiscardedAt == nil {
 		t.Fatal("superseded failed flow is still visible")
 	}
-	payload, err := tokens.ParseTokenPayload(retriedInstance.InputToken.RawData)
-	if err != nil || tokens.TokenPayloadSetString(payload, "value") != "edited" {
+	reader := tokens.NewTokenReader(retriedInstance.InputToken.RawData)
+	var retryInput string
+	if err := reader.Input(&retryInput); err != nil || retryInput != "edited" {
 		t.Fatalf("retried start token = %q, want edited value (error: %v)", retriedInstance.InputToken.RawData, err)
 	}
 }
@@ -343,7 +349,10 @@ func TestServiceRetryFlowReusesPersistedCheckpointWithoutRerunningPreviousNodes(
 	svc := NewService(repo)
 	var generationAttempts atomic.Int32
 	var checkpointAttempts atomic.Int32
-	generated := testEditablePayload(t, "persisted-generation")
+	generated, err := tokens.NewTokenBuilder().SetInput("persisted-generation").EditableSet(tokens.TokenSetInput).PrimarySet(tokens.TokenSetInput).Build()
+	if err != nil {
+		t.Fatalf("build generated input: %v", err)
+	}
 	if err := svc.RegisterFlow(Flow{
 		Name:           "checkpoint-retry-flow",
 		RetryNodeNames: []string{"apply"},
@@ -356,7 +365,12 @@ func TestServiceRetryFlowReusesPersistedCheckpointWithoutRerunningPreviousNodes(
 				if checkpointAttempts.Add(1) == 1 {
 					return "", errors.New("checkpoint failed")
 				}
-				return rawInput + "-applied", nil
+				reader := tokens.NewTokenReader(rawInput)
+				var input string
+				if err := reader.Input(&input); err != nil {
+					return "", err
+				}
+				return tokens.NewTokenBuilder().SetResult(input + "-applied").Build()
 			}},
 		},
 	}); err != nil {
@@ -378,7 +392,7 @@ func TestServiceRetryFlowReusesPersistedCheckpointWithoutRerunningPreviousNodes(
 	if checkpoint.ID == 0 {
 		t.Fatal("retry checkpoint node missing")
 	}
-	retried, err := svc.RetryFlow(context.Background(), FlowRef(failed.ID), checkpoint.ID, "", "ignored-downstream-edit")
+	retried, err := svc.RetryFlow(context.Background(), FlowRef(failed.ID), checkpoint.ID, tokens.TokenSetInput, "ignored-downstream-edit")
 	if err != nil {
 		t.Fatalf("retry flow: %v", err)
 	}
@@ -390,8 +404,9 @@ func TestServiceRetryFlowReusesPersistedCheckpointWithoutRerunningPreviousNodes(
 	if retriedInstance.Status != FlowStatusFinished {
 		t.Fatalf("retried flow status = %s, want finished", retriedInstance.Status)
 	}
-	payload, err := tokens.ParseTokenPayload(retriedInstance.InputToken.RawData)
-	if err != nil || tokens.TokenPayloadSetString(payload, "value") != "ignored-downstream-edit" {
+	reader := tokens.NewTokenReader(retriedInstance.InputToken.RawData)
+	var retryInput string
+	if err := reader.Input(&retryInput); err != nil || retryInput != "ignored-downstream-edit" {
 		t.Fatalf("retried checkpoint token = %q, want edited value (error: %v)", retriedInstance.InputToken.RawData, err)
 	}
 	if generationAttempts.Load() != 1 {
@@ -482,7 +497,12 @@ func TestServiceParentAwaitsChildByReference(t *testing.T) {
 			Name: "run",
 			Action: func(ctx context.Context, rawInput string, runtime Runtime) (string, error) {
 				<-releaseChild
-				return tokens.NewTokenBuilder().SetResult(rawInput + "-child").Build()
+				reader := tokens.NewTokenReader(rawInput)
+				var input string
+				if err := reader.Input(&input); err != nil {
+					return "", err
+				}
+				return tokens.NewTokenBuilder().SetResult(input + "-child").Build()
 			},
 		}},
 	}); err != nil {
@@ -494,6 +514,11 @@ func TestServiceParentAwaitsChildByReference(t *testing.T) {
 			{
 				Name: "trigger",
 				Action: func(ctx context.Context, rawInput string, runtime Runtime) (string, error) {
+					reader := tokens.NewTokenReader(rawInput)
+					var input string
+					if err := reader.Input(&input); err != nil {
+						return "", err
+					}
 					ref, err := runtime.StartFlow(ctx, "joined-child", rawInput)
 					if err != nil {
 						return "", err
@@ -506,12 +531,19 @@ func TestServiceParentAwaitsChildByReference(t *testing.T) {
 					if err := json.Unmarshal(result, &childResult); err != nil {
 						return "", err
 					}
-					return rawInput + "-waiting|" + childResult, nil
+					return tokens.NewTokenBuilder().SetResult(input + "-waiting|" + childResult).Build()
 				},
 			},
 			{
-				Name:   "apply",
-				Action: func(_ context.Context, rawInput string, _ Runtime) (string, error) { return rawInput, nil },
+				Name: "apply",
+				Action: func(_ context.Context, rawInput string, _ Runtime) (string, error) {
+					reader := tokens.NewTokenReader(rawInput)
+					var input string
+					if err := reader.Input(&input); err != nil {
+						return "", err
+					}
+					return tokens.NewTokenBuilder().SetResult(input).Build()
+				},
 			},
 		},
 	}); err != nil {
@@ -527,16 +559,18 @@ func TestServiceParentAwaitsChildByReference(t *testing.T) {
 	if exec.Status != FlowStatusFinished {
 		t.Fatalf("expected joined parent to finish, got %s: %v", exec.Status, exec.Error)
 	}
-	if exec.EndToken != "start-waiting|start-child" {
-		t.Fatalf("unexpected joined parent output: %q", exec.EndToken)
+	reader := tokens.NewTokenReader(exec.EndToken)
+	var result string
+	if err := reader.Result(&result); err != nil || result != "start-waiting|start-child" {
+		t.Fatalf("unexpected joined parent output: %q (result %q, error %v)", exec.EndToken, result, err)
 	}
 }
 
 func TestInheritFlowMetadataInStartTokenPreservesExplicitValues(t *testing.T) {
 	startToken, err := tokens.NewTokenBuilder().
 		SetInput("child-input").
-		Meta("shared", "child").
-		Meta("child-only", true).
+		SetMeta("shared", "child").
+		SetMeta("child-only", true).
 		Build()
 	if err != nil {
 		t.Fatalf("build child start token: %v", err)
@@ -882,7 +916,11 @@ func TestServiceRetryRestartsFailedChildWorkflow(t *testing.T) {
 
 func testEditablePayload(t *testing.T, value string) string {
 	t.Helper()
-	payload, err := tokens.BuildTokenPayload(map[string]any{"value": value}, map[string]any{"admin.primary_set": "value"})
+	payload, err := tokens.NewTokenBuilder().
+		SetInput(value).
+		EditableSet(tokens.TokenSetInput).
+		PrimarySet(tokens.TokenSetInput).
+		Build()
 	if err != nil {
 		t.Fatalf("build token payload: %v", err)
 	}
@@ -1031,7 +1069,12 @@ func TestServiceActionCanStartAnotherFlow(t *testing.T) {
 			{
 				Name: "child-node",
 				Action: func(ctx context.Context, rawInput string, runtime Runtime) (string, error) {
-					return tokens.NewTokenBuilder().SetResult(rawInput + "-child").Build()
+					reader := tokens.NewTokenReader(rawInput)
+					var input string
+					if err := reader.Input(&input); err != nil {
+						return "", err
+					}
+					return tokens.NewTokenBuilder().SetResult(input + "-child").Build()
 				},
 			},
 		},
@@ -1045,6 +1088,11 @@ func TestServiceActionCanStartAnotherFlow(t *testing.T) {
 			{
 				Name: "start-child",
 				Action: func(ctx context.Context, rawInput string, runtime Runtime) (string, error) {
+					reader := tokens.NewTokenReader(rawInput)
+					var input string
+					if err := reader.Input(&input); err != nil {
+						return "", err
+					}
 					ref, err := runtime.StartFlow(ctx, "child", rawInput)
 					if err != nil {
 						return "", err
@@ -1057,7 +1105,7 @@ func TestServiceActionCanStartAnotherFlow(t *testing.T) {
 					if err := json.Unmarshal(result, &childResult); err != nil {
 						return "", err
 					}
-					return fmt.Sprintf("%s|%s", rawInput, childResult), nil
+					return tokens.NewTokenBuilder().SetResult(fmt.Sprintf("%s|%s", input, childResult)).Build()
 				},
 			},
 		},
@@ -1080,8 +1128,10 @@ func TestServiceActionCanStartAnotherFlow(t *testing.T) {
 	if persistedParent.OutputToken == nil {
 		t.Fatal("parent output token missing")
 	}
-	if persistedParent.OutputToken.RawData != "start-token|start-token-child" {
-		t.Fatalf("unexpected parent output token: %q", persistedParent.OutputToken.RawData)
+	parentReader := tokens.NewTokenReader(persistedParent.OutputToken.RawData)
+	var parentResult string
+	if err := parentReader.Result(&parentResult); err != nil || parentResult != "start-token|start-token-child" {
+		t.Fatalf("unexpected parent output token: %q (result %q, error %v)", persistedParent.OutputToken.RawData, parentResult, err)
 	}
 
 	child := waitForFlowInstanceByNameAndStatus(t, repo, "child", FlowStatusFinished)

@@ -20,9 +20,9 @@ const (
 // returned builder to serialize the token.
 func NewAssistantTokenBuilder(assistantName, stepName string, state any) *tokens.TokenBuilder {
 	builder := tokens.NewTokenBuilder().
-		Meta(TokenMetaAssistantName, assistantName).
-		Meta(TokenMetaAssistantStep, stepName).
-		Meta(TokenMetaAssistantStateSet, TokenMetaAssistantStateSet).
+		SetMeta(TokenMetaAssistantName, assistantName).
+		SetMeta(TokenMetaAssistantStep, stepName).
+		SetMeta(TokenMetaAssistantStateSet, TokenMetaAssistantStateSet).
 		Type(AssistantTokenTypeStep)
 	if state != nil {
 		builder.Set(TokenMetaAssistantStateSet, state)

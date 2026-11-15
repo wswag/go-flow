@@ -51,15 +51,26 @@ func TestStartMiddlewareRedirectsFlowAndToken(t *testing.T) {
 	}
 	for _, name := range []string{"requested", "proxy"} {
 		name := name
-		if err := svc.RegisterFlow(Flow{Name: name, Nodes: []FlowNode{{Name: "run", Action: func(_ context.Context, input string, _ Runtime) (string, error) {
-			return input, nil
+		if err := svc.RegisterFlow(Flow{Name: name, Nodes: []FlowNode{{Name: "run", Action: func(_ context.Context, raw string, _ Runtime) (string, error) {
+			reader := tokens.NewTokenReader(raw)
+			var input string
+			if err := reader.Input(&input); err != nil {
+				return "", err
+			}
+			return tokens.NewTokenBuilder().SetResult(input).Build()
 		}}}}); err != nil {
 			t.Fatalf("register %s flow: %v", name, err)
 		}
 	}
 	svc.RegisterStartMiddleware(StartMiddlewareFunc(func(ctx context.Context, request StartRequest, next StartFlowNext) (*FlowExecutionContext, error) {
 		request.FlowName = "proxy"
-		request.StartToken += "-redirected"
+		updatedToken, err := tokens.NewTokenBuilder().
+			SetInput(request.StartToken + "-redirected").
+			Build()
+		if err != nil {
+			return nil, err
+		}
+		request.StartToken = updatedToken
 		return next(ctx, request)
 	}))
 
@@ -68,8 +79,10 @@ func TestStartMiddlewareRedirectsFlowAndToken(t *testing.T) {
 		t.Fatalf("start redirected flow: %v", err)
 	}
 	waitForDone(t, exec.Done())
-	if exec.FlowName != "proxy" || exec.EndToken != "input-redirected" {
-		t.Fatalf("redirected execution = flow %q output %q", exec.FlowName, exec.EndToken)
+	reader := tokens.NewTokenReader(exec.EndToken)
+	var result string
+	if err := reader.Result(&result); err != nil || exec.FlowName != "proxy" || result != "input-redirected" {
+		t.Fatalf("redirected execution = flow %q output %q (result %q, error %v)", exec.FlowName, exec.EndToken, result, err)
 	}
 }
 
@@ -94,7 +107,12 @@ func TestPerCallStartMiddlewareRunsForStartedChildWorkflow(t *testing.T) {
 	if err := AutoMigrate(svc.store.db); err != nil {
 		t.Fatalf("auto migrate flow tables: %v", err)
 	}
-	if err := svc.RegisterFlow(Flow{Name: "child-proxy", Nodes: []FlowNode{{Name: "run", Action: func(_ context.Context, input string, _ Runtime) (string, error) {
+	if err := svc.RegisterFlow(Flow{Name: "child-proxy", Nodes: []FlowNode{{Name: "run", Action: func(_ context.Context, raw string, _ Runtime) (string, error) {
+		reader := tokens.NewTokenReader(raw)
+		var input string
+		if err := reader.Input(&input); err != nil {
+			return "", err
+		}
 		return tokens.NewTokenBuilder().SetResult(input + "-child-proxy").Build()
 	}}}}); err != nil {
 		t.Fatalf("register child proxy flow: %v", err)
@@ -155,15 +173,28 @@ func TestActionMiddlewaresComposeForEngineAndPerCall(t *testing.T) {
 	if err := AutoMigrate(svc.store.db); err != nil {
 		t.Fatalf("auto migrate flow tables: %v", err)
 	}
-	if err := svc.RegisterFlow(Flow{Name: "action-middleware", Nodes: []FlowNode{{Name: "run", Action: func(_ context.Context, input string, _ Runtime) (string, error) {
-		return input, nil
+	if err := svc.RegisterFlow(Flow{Name: "action-middleware", Nodes: []FlowNode{{Name: "run", Action: func(_ context.Context, raw string, _ Runtime) (string, error) {
+		reader := tokens.NewTokenReader(raw)
+		var input string
+		if err := reader.Input(&input); err != nil {
+			return "", err
+		}
+		return tokens.NewTokenBuilder().SetResult(input).Build()
 	}}}}); err != nil {
 		t.Fatalf("register flow: %v", err)
 	}
 	svc.RegisterActionMiddleware(ActionMiddlewareFunc(func(next Action) Action {
 		return func(ctx context.Context, input string, runtime Runtime) (string, error) {
 			output, err := next(ctx, input, runtime)
-			return output + "-engine", err
+			if err != nil {
+				return output, err
+			}
+			reader := tokens.NewTokenReader(output)
+			var result string
+			if err := reader.Result(&result); err != nil {
+				return "", err
+			}
+			return tokens.NewTokenBuilder().SetResult(result + "-engine").Build()
 		}
 	}))
 
@@ -171,7 +202,15 @@ func TestActionMiddlewaresComposeForEngineAndPerCall(t *testing.T) {
 		ActionMiddlewares: []ActionMiddleware{ActionMiddlewareFunc(func(next Action) Action {
 			return func(ctx context.Context, input string, runtime Runtime) (string, error) {
 				output, err := next(ctx, input, runtime)
-				return output + "-call", err
+				if err != nil {
+					return output, err
+				}
+				reader := tokens.NewTokenReader(output)
+				var result string
+				if err := reader.Result(&result); err != nil {
+					return "", err
+				}
+				return tokens.NewTokenBuilder().SetResult(result + "-call").Build()
 			}
 		})},
 	})
@@ -179,8 +218,10 @@ func TestActionMiddlewaresComposeForEngineAndPerCall(t *testing.T) {
 		t.Fatalf("start flow: %v", err)
 	}
 	waitForDone(t, exec.Done())
-	if exec.EndToken != "input-call-engine" {
-		t.Fatalf("end token = %q, want input-call-engine", exec.EndToken)
+	reader := tokens.NewTokenReader(exec.EndToken)
+	var result string
+	if err := reader.Result(&result); err != nil || result != "input-call-engine" {
+		t.Fatalf("end token = %q, want result input-call-engine (got %q, error %v)", exec.EndToken, result, err)
 	}
 }
 
