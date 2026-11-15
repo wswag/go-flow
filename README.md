@@ -14,35 +14,77 @@ go get github.com/wswag/go-flow
 ## Workflow example
 
 ```go
+package example
+
 import (
 	"context"
 
-	"github.com/wswag/go-flow/workflows"
 	"github.com/wswag/go-flow/tokens"
 	_ "github.com/wswag/go-flow/tokens/gzip" // registers the gz: storage codec
+	"github.com/wswag/go-flow/workflows"
 	"gorm.io/gorm"
 )
 
-func startExample(ctx context.Context, db *gorm.DB) error {
+// GreetingFlowName identifies this workflow.
+// Name: GreetingFlow
+// Funktion: Liest einen Namen aus dem Start-Token und liefert eine Begrüßung.
+const GreetingFlowName = "greeting"
+
+// GreetingStartToken contains the input supplied when the flow starts.
+type GreetingStartToken struct {
+	Name string `json:"name"`
+}
+
+// GreetingResult contains the final output produced by the flow.
+type GreetingResult struct {
+	Message string `json:"message"`
+}
+
+func registerGreetingFlow(engine *workflows.Service) error {
+	return engine.RegisterFlow(workflows.Flow{
+		Name: GreetingFlowName,
+		Nodes: []workflows.FlowNode{{
+			Name: "greet",
+			Action: func(_ context.Context, input string, _ workflows.Runtime) (string, error) {
+				reader := tokens.NewTokenReader(input)
+				if err := reader.Err(); err != nil {
+					return "", err
+				}
+				var start GreetingStartToken
+				if err := reader.Decode("start", &start); err != nil {
+					return "", err
+				}
+				return tokens.NewTokenBuilder().
+					SetResult(GreetingResult{Message: "Hello, " + start.Name + "!"}).
+					Build()
+			},
+		}},
+	})
+}
+
+func startGreeting(ctx context.Context, db *gorm.DB, name string) error {
 	if err := workflows.AutoMigrate(db); err != nil {
 		return err
 	}
 	engine := workflows.NewService(workflows.NewRepository(db))
-	if err := engine.RegisterFlow(workflows.Flow{
-		Name: "example",
-		Nodes: []workflows.FlowNode{{
-			Name: "finish",
-			Action: func(ctx context.Context, input string, runtime workflows.Runtime) (string, error) {
-				return input, nil
-			},
-		}},
-	}); err != nil {
+	if err := registerGreetingFlow(engine); err != nil {
 		return err
 	}
-	_, err := engine.StartFlow(ctx, "example", "start-token")
+	startToken, err := tokens.NewTokenBuilder().
+		Set("start", GreetingStartToken{Name: name}).
+		Build()
+	if err != nil {
+		return err
+	}
+	_, err = engine.StartFlow(ctx, GreetingFlowName, startToken)
 	return err
 }
 ```
+
+Workflow-Beispiele folgen der Dateireihenfolge: `package` und Imports, ein
+Dokumentationsblock mit `Name` und `Funktion`, die Namenskonstante, der
+dokumentierte `StartToken`-Typ, der dokumentierte `Result`-Typ und danach die
+Implementierung.
 
 Registering `tokens/gzip` enables transparent compression for persisted workflow
 tokens. The same package provides the shared payload format:
