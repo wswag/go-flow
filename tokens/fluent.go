@@ -24,24 +24,24 @@ type TokenBuilder struct {
 }
 
 // NewTokenBuilder creates an empty token payload builder with state as the
-// primary set and result as the editable set. These selections can be changed
+// primary set and input as the editable set. These selections can be changed
 // with PrimarySet and EditableSet.
 func NewTokenBuilder() *TokenBuilder {
 	b := &TokenBuilder{sets: map[string]any{}, meta: map[string]any{}}
 	b.PrimarySet(TokenSetState)
-	b.EditableSet(TokenSetResult)
+	b.EditableSet(TokenSetInput)
 	return b
 }
 
 // NewTokenBuilderFrom creates a builder that parses and preserves an existing
 // payload's sets and metadata when Build is called. It defaults to state as
-// the primary set and result as the editable set; these selections can be
+// the primary set and input as the editable set; these selections can be
 // changed with PrimarySet and EditableSet. Invalid or empty input is reported
 // by Build.
 func NewTokenBuilderFrom(raw string) *TokenBuilder {
 	b := &TokenBuilder{raw: raw, mergeExisting: true, sets: map[string]any{}, meta: map[string]any{}}
 	b.PrimarySet(TokenSetState)
-	b.EditableSet(TokenSetResult)
+	b.EditableSet(TokenSetInput)
 	return b
 }
 
@@ -64,6 +64,12 @@ func (b *TokenBuilder) Set(key string, value any) *TokenBuilder {
 // result when called by the last node.
 func (b *TokenBuilder) SetResult(value any) *TokenBuilder {
 	return b.Set(TokenSetResult, value)
+}
+
+// SetInput stores the value a node receives. Flow starts and preceding nodes
+// provide this set to the next node.
+func (b *TokenBuilder) SetInput(value any) *TokenBuilder {
+	return b.Set(TokenSetInput, value)
 }
 
 // SetState stores information that is needed across nodes. If any of that
@@ -258,6 +264,12 @@ func (r *TokenReader) Decode(key string, target any) error {
 // target.
 func (r *TokenReader) Result(target any) error {
 	return r.Decode(TokenSetResult, target)
+}
+
+// Input decodes the value provided to a node by the flow start or previous
+// node.
+func (r *TokenReader) Input(target any) error {
+	return r.Decode(TokenSetInput, target)
 }
 
 // State decodes information carried across nodes into target. To make any of
