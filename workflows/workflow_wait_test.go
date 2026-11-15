@@ -95,23 +95,22 @@ func TestWaitingParentFailsWhenChildActionFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := svc.RegisterFlow(Flow{Name: "waiting-parent", Nodes: []FlowNode{{Name: "wait", Action: func(ctx context.Context, raw string, runtime Runtime) (string, error) {
-		if err := runtime.TriggerFlow(ctx, "failing-child", raw); err != nil {
+		ref, err := runtime.StartWorkflow(ctx, "failing-child", raw)
+		if err != nil {
 			return "", err
 		}
-		if err := runtime.WaitForTriggeredFlows(ctx); err != nil {
-			return "", err
-		}
-		return raw, nil
+		result, err := runtime.AwaitWorkflow(ctx, ref)
+		return string(result), err
 	}}}}); err != nil {
 		t.Fatal(err)
 	}
 
-	exec, err := svc.StartFlow(context.Background(), "waiting-parent", testEditablePayload(t, "input"))
+	exec, err := svc.startFlowExecution(context.Background(), "waiting-parent", testEditablePayload(t, "input"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	<-childStarted
-	parent := waitForFlowInstanceByNameAndStatus(t, repo, "waiting-parent", FlowStatusWaiting)
+	parent := waitForFlowInstanceByNameAndStatus(t, repo, "waiting-parent", FlowStatusRunning)
 	close(releaseChild)
 	result, err := svc.WaitForWorkflow(context.Background(), parent.ID, WorkflowWaitOptions{Timeout: time.Second})
 	if err != nil {

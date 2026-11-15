@@ -245,11 +245,19 @@ func (s *Service) RegisterActionMiddleware(middleware ActionMiddleware) {
 	s.mu.Unlock()
 }
 
-// StartFlow startet einen neuen Workflow und lässt ihn im Hintergrund weiterlaufen.
-// The optional StartOptions supplies metadata, idempotency, parent links,
-// triggered-flow tracking, and per-call middleware. At most one options value
-// may be provided.
-func (s *Service) StartFlow(ctx context.Context, name string, startToken string, options ...StartOptions) (*FlowExecutionContext, error) {
+// StartFlow starts a workflow in the background and returns its serializable
+// instance reference. At most one StartOptions value may be provided.
+func (s *Service) StartFlow(ctx context.Context, name string, startToken string, options ...StartOptions) (WorkflowRef, error) {
+	exec, err := s.startFlowExecution(ctx, name, startToken, options...)
+	if err != nil {
+		return 0, err
+	}
+	return WorkflowRef(exec.FlowInstanceID), nil
+}
+
+// startFlowExecution runs the start middleware pipeline and returns its
+// process-local execution handle.
+func (s *Service) startFlowExecution(ctx context.Context, name string, startToken string, options ...StartOptions) (*FlowExecutionContext, error) {
 	if s == nil {
 		return nil, errors.New("flow service is not configured")
 	}
@@ -336,11 +344,7 @@ func (s *Service) startFlowCore(ctx context.Context, request StartRequest) (*Flo
 	if err != nil {
 		return nil, err
 	}
-	targetFlowName := strings.TrimSpace(startOptions.TargetFlowName)
-	if targetFlowName == "" || targetFlowName == strings.TrimSpace(name) {
-		return exec, nil
-	}
-	return s.wrapTriggeredFlowExecution(context.WithoutCancel(ctx), exec, targetFlowName), nil
+	return exec, nil
 }
 
 // startFlowAtNode validates, persists, and optionally launches a flow at a
@@ -367,8 +371,9 @@ func (s *Service) startFlowAtNode(ctx context.Context, name string, startToken s
 	var instanceID uint
 	metadataJSON := ""
 	idempotencyKey := strings.TrimSpace(options.IdempotencyKey)
-	if len(options.Metadata) > 0 {
-		encoded, encodeErr := json.Marshal(options.Metadata)
+	metadata := EnsureCorrelationMetadata(options.Metadata, flow.Label, flow.Description)
+	if len(metadata) > 0 {
+		encoded, encodeErr := json.Marshal(metadata)
 		if encodeErr != nil {
 			return nil, encodeErr
 		}
@@ -381,15 +386,14 @@ func (s *Service) startFlowAtNode(ctx context.Context, name string, startToken s
 			return err
 		}
 		instance := &FlowInstance{
-			Name:               flow.Name,
-			Status:             FlowStatusRunning,
-			IdempotencyKey:     idempotencyKey,
-			CurrentNodeIndex:   startNodeIndex,
-			InputTokenID:       &startTokenRecord.ID,
-			ParentSystemNodeID: options.ParentSystemNodeID,
-			MetadataJSON:       metadataJSON,
-			StartedAt:          now,
-			UpdatedAt:          now,
+			Name:             flow.Name,
+			Status:           FlowStatusRunning,
+			IdempotencyKey:   idempotencyKey,
+			CurrentNodeIndex: startNodeIndex,
+			InputTokenID:     &startTokenRecord.ID,
+			MetadataJSON:     metadataJSON,
+			StartedAt:        now,
+			UpdatedAt:        now,
 		}
 		if err := tx.CreateFlowInstance(ctx, instance); err != nil {
 			return err
@@ -553,9 +557,6 @@ func (s *Service) ResumeStoppedFlows(ctx context.Context) ([]*FlowExecutionConte
 			resumed = append(resumed, exec)
 		}
 	}
-	if _, dispatchErr := s.ResumeQueuedSystemNodes(ctx); dispatchErr != nil && firstErr == nil {
-		firstErr = dispatchErr
-	}
 	return resumed, firstErr
 }
 
@@ -612,59 +613,82 @@ func (s *Service) ResumeFlowInstance(ctx context.Context, flowInstanceID uint) (
 	return exec, nil
 }
 
+// GetExecutionContext returns the local execution handle for a workflow
+// instance, or a snapshot reconstructed from persistence when no local handle
+// is active.
+func (s *Service) GetExecutionContext(ctx context.Context, flowInstanceID uint) (*FlowExecutionContext, error) {
+	if s == nil || s.store == nil {
+		return nil, errors.New("flow store is not configured")
+	}
+	if flowInstanceID == 0 {
+		return nil, errors.New("workflow instance is required")
+	}
+	s.mu.RLock()
+	exec := s.active[flowInstanceID]
+	s.mu.RUnlock()
+	if exec != nil {
+		return exec, nil
+	}
+	instance, err := s.store.FindFlowInstanceByID(ctx, flowInstanceID)
+	if err != nil {
+		return nil, err
+	}
+	return s.executionFromInstance(instance), nil
+}
+
 // RetryFlowInstance starts a configured retry as a fresh workflow instance.
 //
 // Reusing the failed instance is only safe when all side effects before the
 // current checkpoint are still present. Some workflows compensate those
 // effects when a downstream branch fails. A fresh run therefore starts at the
 // configured persisted checkpoint, reusing the already generated input token.
-func (s *Service) RetryFlowInstance(ctx context.Context, flowInstanceID uint, nodeID uint, setKey string, value string) (*FlowExecutionContext, error) {
+func (s *Service) RetryFlowInstance(ctx context.Context, flowInstanceID uint, nodeID uint, setKey string, value string) (WorkflowRef, error) {
 	if s == nil || s.store == nil {
-		return nil, errors.New("flow store is not configured")
+		return 0, errors.New("flow store is not configured")
 	}
 	if flowInstanceID == 0 || nodeID == 0 {
-		return nil, errors.New("flow instance and node are required")
+		return 0, errors.New("flow instance and node are required")
 	}
 	if s.isActive(flowInstanceID) {
-		return nil, errors.New("workflow is still running")
+		return 0, errors.New("workflow is still running")
 	}
 	instance, err := s.store.FindFlowInstanceByID(ctx, flowInstanceID)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	definition, err := s.flowDefinition(instance.Name)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	if instance.Status != FlowStatusFailed {
-		return nil, errors.New("nur fehlgeschlagene workflows können als neue instanz neu gestartet werden")
+		return 0, errors.New("nur fehlgeschlagene workflows können als neue instanz neu gestartet werden")
 	}
 	node, err := s.store.FindNodeInstanceByID(ctx, nodeID)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	if node.FlowInstanceID != instance.ID {
-		return nil, errors.New("node does not belong to flow instance")
+		return 0, errors.New("node does not belong to flow instance")
 	}
 	selectedCheckpoint := isRetryCheckpointNode(definition, node.NodeIndex) && node.NodeIndex <= instance.CurrentNodeIndex
 	if !selectedCheckpoint && node.NodeIndex != instance.CurrentNodeIndex {
-		return nil, errors.New("nur der aktuelle knoten oder ein erreichter retry-checkpoint kann neu gestartet werden")
+		return 0, errors.New("nur der aktuelle knoten oder ein erreichter retry-checkpoint kann neu gestartet werden")
 	}
 	startNodeIndex := node.NodeIndex
 	if !selectedCheckpoint {
 		var ok bool
 		startNodeIndex, ok = nearestRetryNodeIndex(definition, instance.CurrentNodeIndex)
 		if !ok {
-			return nil, fmt.Errorf("workflow %q has no retry checkpoint at or before node %d", definition.Name, instance.CurrentNodeIndex)
+			return 0, fmt.Errorf("workflow %q has no retry checkpoint at or before node %d", definition.Name, instance.CurrentNodeIndex)
 		}
 	}
 	startNode := findNodeInstanceByIndex(instance.NodeInstances, startNodeIndex)
 	if startNode.ID == 0 || startNode.InputTokenID == nil {
-		return nil, fmt.Errorf("workflow is missing retry checkpoint node %d", startNodeIndex)
+		return 0, fmt.Errorf("workflow is missing retry checkpoint node %d", startNodeIndex)
 	}
 	startTokenRecord, err := s.store.FindTokenByID(ctx, *startNode.InputTokenID)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	startToken := startTokenRecord.RawData
 	// Editing the retry checkpoint remains supported. For a later failed node
@@ -678,7 +702,7 @@ func (s *Service) RetryFlowInstance(ctx context.Context, flowInstanceID uint, no
 			startToken, err = rewritePrimaryTokenPayloadSet(startToken, value)
 		}
 		if err != nil {
-			return nil, err
+			return 0, err
 		}
 	}
 
@@ -696,160 +720,16 @@ func (s *Service) RetryFlowInstance(ctx context.Context, flowInstanceID uint, no
 
 	started, err := s.startFlowAtNode(ctx, instance.Name, startToken, startNodeIndex, StartOptions{Metadata: freshMetadata}, false)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	// Hide the superseded failure from user-facing "latest failure" lookups,
 	// while retaining the complete failed run for diagnostics and correlation.
 	if err := retryFlowSQLiteBusy(func() error { return s.DiscardFlowInstance(ctx, instance.ID) }); err != nil {
 		s.clearActive(started.FlowInstanceID)
-		return nil, err
+		return 0, err
 	}
 	s.launchExecution(started)
-	return started, nil
-}
-
-// ResumeQueuedSystemNodes startet System-Knoten für abgeschlossene oder auf
-// ihre Kind-Flows wartende Flows erneut. Dadurch gehen Folge-Flows nach einem
-// Neustart nicht verloren.
-func (s *Service) ResumeQueuedSystemNodes(ctx context.Context) ([]*FlowExecutionContext, error) {
-	if s == nil || s.store == nil {
-		return nil, errors.New("flow store is not configured")
-	}
-	nodes, err := s.store.ListQueuedSystemNodes(ctx, 200)
-	if err != nil {
-		return nil, err
-	}
-	executions := make([]*FlowExecutionContext, 0, len(nodes))
-	var firstErr error
-	for _, node := range nodes {
-		flowInstance := node.FlowInstance
-		if flowInstance == nil {
-			continue
-		}
-		if flowInstance.Status != FlowStatusFinished && flowInstance.Status != FlowStatusWaiting {
-			continue
-		}
-		exec, startErr := s.dispatchSystemNode(ctx, node)
-		if startErr != nil {
-			if firstErr == nil {
-				firstErr = startErr
-			}
-			continue
-		}
-		if exec != nil {
-			executions = append(executions, exec)
-		}
-	}
-	return executions, firstErr
-}
-
-// wrapTriggeredFlowExecution exposes an entry flow and its triggered target as
-// one execution handle that completes when the target flow completes.
-func (s *Service) wrapTriggeredFlowExecution(ctx context.Context, entryExec *FlowExecutionContext, targetFlowName string) *FlowExecutionContext {
-	if entryExec == nil {
-		return &FlowExecutionContext{
-			FlowName: strings.TrimSpace(targetFlowName),
-			Status:   FlowStatusFailed,
-			Error:    errors.New("flow execution is not configured"),
-			done:     closedDoneChannel(),
-		}
-	}
-	entryFlowInstanceID := entryExec.FlowInstanceID
-	proxy := &FlowExecutionContext{
-		FlowName:       strings.TrimSpace(targetFlowName),
-		FlowInstanceID: entryFlowInstanceID,
-		Status:         FlowStatusRunning,
-		done:           make(chan struct{}),
-	}
-	// Der Entry-Exec wird bereits asynchron verändert. Die initiale
-	// Proxy-Darstellung kommt deshalb aus dem persistierten Snapshot statt aus
-	// dem live beschriebenen Context.
-	if persisted, err := s.store.FindFlowInstanceByID(ctx, entryFlowInstanceID); err == nil {
-		initial := s.executionFromInstance(persisted)
-		copyFlowExecutionState(proxy, initial)
-	}
-	go func() {
-		defer close(proxy.done)
-		<-entryExec.Done()
-		if entryExec.Error != nil || entryExec.Status != FlowStatusFinished {
-			copyFlowExecutionState(proxy, entryExec)
-			return
-		}
-		// Der Ziel-Flow kann wegen SQLite-Locks oder Folge-Dispatch kurz spaeter sichtbar werden.
-		// Ein zu knappes Timeout fuehrt sonst zu false negatives, obwohl der Fach-Workflow korrekt weiterlaeuft.
-		waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		defer cancel()
-		childExec, err := s.waitForTriggeredFlowExecution(waitCtx, entryFlowInstanceID, targetFlowName)
-		if err != nil {
-			copyFlowExecutionState(proxy, entryExec)
-			proxy.Status = FlowStatusFailed
-			proxy.Error = err
-			return
-		}
-		<-childExec.Done()
-		copyFlowExecutionState(proxy, childExec)
-	}()
-	return proxy
-}
-
-// copyFlowExecutionState copies current status fields between handles for the
-// same flow chain.
-func copyFlowExecutionState(dst *FlowExecutionContext, src *FlowExecutionContext) {
-	if dst == nil || src == nil {
-		return
-	}
-	dst.FlowName = src.FlowName
-	dst.FlowInstanceID = src.FlowInstanceID
-	dst.Status = src.Status
-	dst.CurrentNodeIndex = src.CurrentNodeIndex
-	dst.CurrentNodeName = src.CurrentNodeName
-	dst.StartToken = src.StartToken
-	dst.EndToken = src.EndToken
-	dst.MetadataJSON = src.MetadataJSON
-	dst.IdempotencyKey = src.IdempotencyKey
-	dst.Reused = src.Reused
-	dst.Error = src.Error
-}
-
-// waitForTriggeredFlowExecution waits for the child flow linked to the parent
-// instance and requested target name to reach a terminal state.
-func (s *Service) waitForTriggeredFlowExecution(ctx context.Context, parentFlowInstanceID uint, targetFlowName string) (*FlowExecutionContext, error) {
-	ticker := time.NewTicker(25 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		exec, err := s.findTriggeredFlowExecution(ctx, parentFlowInstanceID, targetFlowName)
-		if err == nil && exec != nil {
-			return exec, nil
-		}
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, err
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-ticker.C:
-		}
-	}
-}
-
-// findTriggeredFlowExecution loads the child execution linked to a parent
-// system node, starting or resuming it when required.
-func (s *Service) findTriggeredFlowExecution(ctx context.Context, parentFlowInstanceID uint, targetFlowName string) (*FlowExecutionContext, error) {
-	if s == nil || s.store == nil {
-		return nil, errors.New("flow store is not configured")
-	}
-	parent, err := s.store.FindFlowInstanceByID(ctx, parentFlowInstanceID)
-	if err != nil {
-		return nil, err
-	}
-	targetFlowName = strings.TrimSpace(targetFlowName)
-	for _, node := range parent.NodeInstances {
-		if !node.SystemNode || strings.TrimSpace(node.SystemFlowName) != targetFlowName || node.SystemFlowInstanceID == nil || *node.SystemFlowInstanceID == 0 {
-			continue
-		}
-		return s.ResumeFlowInstance(ctx, *node.SystemFlowInstanceID)
-	}
-	return nil, gorm.ErrRecordNotFound
+	return WorkflowRef(started.FlowInstanceID), nil
 }
 
 // UpdateCurrentNodeStartToken ersetzt den editierbaren Tokenwert des aktuellen Knotens.
@@ -878,7 +758,6 @@ func (s *Service) updateCurrentNodeStartToken(ctx context.Context, flowInstanceI
 	}
 
 	now := time.Now().UTC()
-	var restartTriggeredFlows bool
 	if err := s.store.Transaction(ctx, func(tx *Repository) error {
 		instance, err := tx.FindFlowInstanceByID(ctx, flowInstanceID)
 		if err != nil {
@@ -967,61 +846,11 @@ func (s *Service) updateCurrentNodeStartToken(ctx context.Context, flowInstanceI
 			return err
 		}
 
-		if node.PreviousNodeInstanceID != nil {
-			var triggered []NodeInstance
-			if err := tx.db.WithContext(ctx).
-				Where("flow_instance_id = ? AND system_node = ? AND previous_node_instance_id = ?", instance.ID, true, *node.PreviousNodeInstanceID).
-				Order("node_index asc").
-				Find(&triggered).Error; err != nil {
-				return err
-			}
-			for index := range triggered {
-				triggeredNode := &triggered[index]
-				childFailed := triggeredNode.Status == NodeStatusFailed
-				if triggeredNode.SystemFlowInstanceID != nil && *triggeredNode.SystemFlowInstanceID != 0 {
-					child, childErr := tx.FindFlowInstanceSummaryByID(ctx, *triggeredNode.SystemFlowInstanceID)
-					if childErr != nil && !errors.Is(childErr, gorm.ErrRecordNotFound) {
-						return childErr
-					}
-					childFailed = childFailed || childErr == nil && child.Status == FlowStatusFailed
-					if childErr == nil && child.Status == FlowStatusFailed {
-						child.ParentSystemNodeID = nil
-						child.UpdatedAt = now
-						if err := tx.UpdateFlowInstance(ctx, &child); err != nil {
-							return err
-						}
-						triggeredNode.SystemFlowInstanceID = nil
-					} else if errors.Is(childErr, gorm.ErrRecordNotFound) {
-						triggeredNode.SystemFlowInstanceID = nil
-					}
-				}
-				if !childFailed {
-					continue
-				}
-				triggeredNode.Status = NodeStatusQueued
-				triggeredNode.Active = true
-				triggeredNode.ErrorMessage = ""
-				triggeredNode.ErrorCode = 0
-				triggeredNode.OutputTokenID = nil
-				triggeredNode.FinishedAt = nil
-				triggeredNode.StartedAt = now
-				triggeredNode.UpdatedAt = now
-				triggeredNode.MetadataJSON = string(freshMetadataJSON)
-				if err := tx.UpdateNodeInstance(ctx, triggeredNode); err != nil {
-					return err
-				}
-				restartTriggeredFlows = true
-			}
-		}
 		instance.InputTokenID = &replacement.ID
 		instance.InputToken = replacement
 		instance.OutputTokenID = nil
 		instance.OutputToken = nil
-		if restartTriggeredFlows {
-			instance.Status = FlowStatusWaiting
-		} else {
-			instance.Status = FlowStatusRunning
-		}
+		instance.Status = FlowStatusRunning
 		instance.CurrentNodeIndex = node.NodeIndex
 		instance.ErrorMessage = ""
 		instance.ErrorCode = 0
@@ -1031,11 +860,6 @@ func (s *Service) updateCurrentNodeStartToken(ctx context.Context, flowInstanceI
 		return tx.UpdateFlowInstance(ctx, &instance)
 	}); err != nil {
 		return err
-	}
-	if restartTriggeredFlows {
-		// Der Parent bleibt zunächst wartend. Die neu eingereihten Kinder lösen
-		// nach ihrem Abschluss automatisch die Fortsetzung des Parents aus.
-		return s.dispatchTriggeredFlows(ctx, flowInstanceID)
 	}
 	return nil
 }
@@ -1173,15 +997,12 @@ func (s *Service) execute(exec *FlowExecutionContext) {
 		if instance.Status == FlowStatusFinished {
 			s.finishExecution(exec, instance)
 			s.broadcastExecutionEventFromInstance(ctx, exec.FlowInstanceID, instance, flow, nil, FlowStatusFinished, "", nil, true)
-			_ = s.syncSystemNodeCompletion(ctx, exec.FlowInstanceID, exec.Status, exec.EndToken, exec.Error)
-			_ = s.dispatchTriggeredFlows(ctx, exec.FlowInstanceID)
 			s.notifyTerminalFromInstance(ctx, exec.FlowInstanceID, instance, flow, nil, FlowStatusFinished, nil)
 			return
 		}
 		if instance.Status == FlowStatusFailed {
 			s.failExecution(exec, errors.New(strings.TrimSpace(instance.ErrorMessage)))
 			s.broadcastExecutionEventFromInstance(ctx, exec.FlowInstanceID, instance, flow, nil, FlowStatusFailed, "", exec.Error, true)
-			_ = s.syncSystemNodeCompletion(ctx, exec.FlowInstanceID, exec.Status, exec.EndToken, exec.Error)
 			s.notifyTerminalFromInstance(ctx, exec.FlowInstanceID, instance, flow, nil, FlowStatusFailed, exec.Error)
 			return
 		}
@@ -1199,8 +1020,6 @@ func (s *Service) execute(exec *FlowExecutionContext) {
 			}
 			s.finishExecution(exec, instance)
 			s.broadcastExecutionEventFromInstance(ctx, exec.FlowInstanceID, instance, flow, nil, FlowStatusFinished, "", nil, true)
-			_ = s.syncSystemNodeCompletion(ctx, exec.FlowInstanceID, exec.Status, exec.EndToken, exec.Error)
-			_ = s.dispatchTriggeredFlows(ctx, exec.FlowInstanceID)
 			s.notifyTerminalFromInstance(ctx, exec.FlowInstanceID, instance, flow, nil, FlowStatusFinished, nil)
 			return
 		}
@@ -1238,33 +1057,18 @@ func (s *Service) execute(exec *FlowExecutionContext) {
 			}
 			if updateErr := s.markExecutionFailed(ctx, instance.ID, node.ID, actionErr, output); updateErr != nil {
 				s.failExecution(exec, updateErr)
-				_ = s.syncSystemNodeCompletion(ctx, exec.FlowInstanceID, exec.Status, exec.EndToken, exec.Error)
 				return
 			}
 			s.failExecution(exec, actionErr)
 			s.broadcastExecutionEventFromInstance(ctx, exec.FlowInstanceID, instance, flow, &node, FlowStatusFailed, "", actionErr, true)
-			_ = s.syncSystemNodeCompletion(ctx, exec.FlowInstanceID, exec.Status, exec.EndToken, exec.Error)
 			s.notifyTerminalFromInstance(ctx, exec.FlowInstanceID, instance, flow, &node, FlowStatusFailed, actionErr)
 			return
 		}
-		// A node that requested child flows commits its output but leaves the
-		// parent at a resumable waiting checkpoint.
-		waiting := runtime.waitForTriggeredFlows
-		if err := s.commitNodeOutput(ctx, instance.ID, node.ID, node.NodeIndex, flow, output, waiting); err != nil {
+		if err := s.commitNodeOutput(ctx, instance.ID, node.ID, node.NodeIndex, flow, output); err != nil {
 			s.failExecution(exec, err)
-			_ = s.syncSystemNodeCompletion(ctx, exec.FlowInstanceID, exec.Status, exec.EndToken, exec.Error)
 			return
 		}
 		exec.EndToken = output
-		if waiting {
-			if err := s.dispatchTriggeredFlows(ctx, exec.FlowInstanceID); err != nil {
-				// dispatchSystemNode persistiert den Fehler am wartenden Parent.
-				// Die Schleife liest diesen Status im nächsten Durchlauf ein.
-				exec.Error = err
-			}
-			exec.Status = FlowStatusWaiting
-			continue
-		}
 		if node.NodeIndex+1 >= len(flow.Nodes) {
 			if freshInstance, freshFlow, loadErr := s.loadExecutionState(ctx, exec.FlowInstanceID); loadErr == nil {
 				instance = freshInstance
@@ -1272,8 +1076,6 @@ func (s *Service) execute(exec *FlowExecutionContext) {
 			}
 			s.finishExecution(exec, instance)
 			s.broadcastExecutionEventFromInstance(ctx, exec.FlowInstanceID, instance, flow, &node, FlowStatusFinished, "", nil, true)
-			_ = s.syncSystemNodeCompletion(ctx, exec.FlowInstanceID, exec.Status, exec.EndToken, exec.Error)
-			_ = s.dispatchTriggeredFlows(ctx, exec.FlowInstanceID)
 			s.notifyTerminalFromInstance(ctx, exec.FlowInstanceID, instance, flow, &node, FlowStatusFinished, nil)
 			return
 		}
@@ -1658,9 +1460,8 @@ func (s *Service) prepareNodeForExecution(ctx context.Context, instance FlowInst
 	return prepared, input, nil
 }
 
-// commitNodeOutput persists a node result and advances the flow, or records a
-// waiting checkpoint when triggered child flows must finish first.
-func (s *Service) commitNodeOutput(ctx context.Context, flowInstanceID uint, nodeID uint, nodeIndex int, flow Flow, output string, waiting bool) error {
+// commitNodeOutput persists a node result and advances the flow.
+func (s *Service) commitNodeOutput(ctx context.Context, flowInstanceID uint, nodeID uint, nodeIndex int, flow Flow, output string) error {
 	return s.store.Transaction(ctx, func(tx *Repository) error {
 		// Persist output, node completion, and the next checkpoint atomically.
 		now := time.Now().UTC()
@@ -1692,11 +1493,7 @@ func (s *Service) commitNodeOutput(ctx context.Context, flowInstanceID uint, nod
 		fresh.CurrentNodeIndex = nodeIndex + 1
 		// Create the next node now so resume always has a durable checkpoint.
 		if nodeIndex+1 < len(flow.Nodes) {
-			if waiting {
-				fresh.Status = FlowStatusWaiting
-			} else {
-				fresh.Status = FlowStatusStopped
-			}
+			fresh.Status = FlowStatusStopped
 			next := &NodeInstance{
 				Name:                   flow.Nodes[nodeIndex+1].Name,
 				FlowInstanceID:         fresh.ID,
@@ -1716,9 +1513,6 @@ func (s *Service) commitNodeOutput(ctx context.Context, flowInstanceID uint, nod
 			if err := tx.UpdateNodeInstance(ctx, &node); err != nil {
 				return err
 			}
-		} else if waiting {
-			fresh.Status = FlowStatusWaiting
-			fresh.FinishedAt = nil
 		} else {
 			fresh.Status = FlowStatusFinished
 			fresh.FinishedAt = &now
@@ -1730,6 +1524,10 @@ func (s *Service) commitNodeOutput(ctx context.Context, flowInstanceID uint, nod
 // markExecutionFailed persists the failure state and output for a node and its
 // containing flow.
 func (s *Service) markExecutionFailed(ctx context.Context, flowInstanceID uint, nodeID uint, execErr error, output string) error {
+	output, err := ensureWorkflowErrorOutput(output, execErr)
+	if err != nil {
+		return err
+	}
 	return s.store.Transaction(ctx, func(tx *Repository) error {
 		now := time.Now().UTC()
 		fresh, err := tx.FindFlowInstanceByID(ctx, flowInstanceID)
@@ -1746,14 +1544,12 @@ func (s *Service) markExecutionFailed(ctx context.Context, flowInstanceID uint, 
 		node.ErrorCode = -1
 		node.UpdatedAt = now
 		node.FinishedAt = &now
-		if strings.TrimSpace(output) != "" {
-			token := Token{RawData: output}
-			if err := tx.CreateToken(ctx, &token); err != nil {
-				return err
-			}
-			node.OutputTokenID = &token.ID
-			node.OutputToken = &token
+		token := Token{RawData: output}
+		if err := tx.CreateToken(ctx, &token); err != nil {
+			return err
 		}
+		node.OutputTokenID = &token.ID
+		node.OutputToken = &token
 		if err := tx.UpdateNodeInstance(ctx, &node); err != nil {
 			return err
 		}
@@ -1765,25 +1561,33 @@ func (s *Service) markExecutionFailed(ctx context.Context, flowInstanceID uint, 
 		if err := tx.UpdateFlowInstance(ctx, &fresh); err != nil {
 			return err
 		}
-		var queuedSystems []NodeInstance
-		if err := tx.db.WithContext(ctx).
-			Where("flow_instance_id = ? AND system_node = ? AND status = ?", flowInstanceID, true, NodeStatusQueued).
-			Find(&queuedSystems).Error; err != nil {
-			return err
-		}
-		for i := range queuedSystems {
-			queuedSystems[i].Status = NodeStatusFailed
-			queuedSystems[i].Active = false
-			queuedSystems[i].ErrorMessage = strings.TrimSpace(execErr.Error())
-			queuedSystems[i].ErrorCode = -1
-			queuedSystems[i].UpdatedAt = now
-			queuedSystems[i].FinishedAt = &now
-			if err := tx.UpdateNodeInstance(ctx, &queuedSystems[i]); err != nil {
-				return err
-			}
-		}
 		return nil
 	})
+}
+
+func ensureWorkflowErrorOutput(output string, execErr error) (string, error) {
+	var payload tokens.TokenPayload
+	if strings.TrimSpace(output) != "" {
+		if parsed, err := tokens.ParseTokenPayload(output); err == nil {
+			payload = parsed
+			if _, exists := payload.Sets[tokens.TokenSetError]; exists {
+				return output, nil
+			}
+		}
+	}
+
+	var flowError tokens.FlowError
+	if !errors.As(execErr, &flowError) {
+		flowError = tokens.FlowError{
+			Message: strings.TrimSpace(execErr.Error()),
+			Code:    "node_error",
+			Data:    map[string]any{},
+		}
+	}
+	if payload.Schema != "" {
+		return tokens.NewTokenBuilderFrom(output).SetError(flowError).Build()
+	}
+	return tokens.NewTokenBuilder().SetError(flowError).Build()
 }
 
 // finalizeCompletedFlow persists successful completion of a flow instance.
@@ -2052,17 +1856,15 @@ func errorMessageFrom(err error) string {
 }
 
 type executionRuntime struct {
-	service               *Service
-	flowInstanceID        uint
-	nodeID                uint
-	nodeIndex             int
-	flowName              string
-	flowInterfaces        []any
-	callInterfaces        []any
-	engineInterfaces      []any
-	currentEvent          FlowEvent
-	waitForTriggeredFlows bool
-	triggeredFlowCount    int
+	service          *Service
+	flowInstanceID   uint
+	nodeID           uint
+	nodeIndex        int
+	flowName         string
+	flowInterfaces   []any
+	callInterfaces   []any
+	engineInterfaces []any
+	currentEvent     FlowEvent
 }
 
 // NewTokenBuilder creates a workflow token builder tagged with the current
@@ -2082,407 +1884,53 @@ func (r *executionRuntime) CurrentEvent() FlowEvent {
 	return r.currentEvent
 }
 
-// TriggerFlow persists a child flow request for dispatch after the current
-// action commits its result.
-func (r *executionRuntime) TriggerFlow(ctx context.Context, name string, startToken string) error {
-	if r == nil || r.service == nil {
-		return errors.New("flow runtime is not configured")
+// StartWorkflow starts a child workflow and returns its unique serializable
+// instance reference. The child inherits correlation metadata and records this
+// node and workflow as its parent.
+func (r *executionRuntime) StartWorkflow(ctx context.Context, name string, startToken string) (WorkflowRef, error) {
+	if r == nil || r.service == nil || r.service.store == nil {
+		return 0, errors.New("flow runtime is not configured")
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return errors.New("flow name is required")
+		return 0, errors.New("flow name is required")
 	}
-	triggerIndex := r.triggeredFlowCount
-	r.triggeredFlowCount++
-	return r.service.persistSystemChild(ctx, r.flowInstanceID, r.nodeID, r.nodeIndex, triggerIndex, name, strings.TrimSpace(startToken))
-}
-
-// WaitForTriggeredFlows hält den aktuellen Flow nach diesem Node an, bis alle
-// von ihm gestarteten System-Folgeflows terminal erfolgreich abgeschlossen sind.
-func (r *executionRuntime) WaitForTriggeredFlows(ctx context.Context) error {
-	if r == nil || r.service == nil || r.flowInstanceID == 0 || r.nodeID == 0 {
-		return errors.New("flow runtime is not configured")
-	}
-	nodes, err := r.service.store.ListSystemNodesByPreviousNode(ctx, r.flowInstanceID, r.nodeID)
+	parent, err := r.service.store.FindFlowInstanceByID(ctx, r.flowInstanceID)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if len(nodes) == 0 {
-		return errors.New("flow node cannot wait without a triggered child flow")
+	metadata := parseFlowMetadata(parent.MetadataJSON).Raw
+	if metadata == nil {
+		metadata = map[string]any{}
 	}
-	r.waitForTriggeredFlows = true
-	return nil
+	metadata = EnsureCorrelationMetadata(metadata, r.currentEvent.CorrelationLabel, r.currentEvent.CorrelationDescription)
+	metadata = InheritCorrelationMetadata(metadata, r.flowInstanceID, r.nodeID, r.nodeIndex)
+	return r.service.StartFlow(ctx, name, strings.TrimSpace(startToken), StartOptions{
+		Metadata:       metadata,
+		Middlewares:    r.service.executionStartMiddlewares(r.flowInstanceID),
+		UserInterfaces: r.service.executionUserInterfaces(r.flowInstanceID),
+	})
 }
 
-// TriggeredFlowOutputs returns successful outputs from child flows started by
-// the current node.
-func (r *executionRuntime) TriggeredFlowOutputs(ctx context.Context) ([]string, error) {
-	if r == nil || r.service == nil || r.flowInstanceID == 0 || r.nodeID == 0 {
+// AwaitWorkflow waits until the referenced workflow completes and returns its
+// result as raw JSON. If the workflow fails, its structured error set is
+// returned as an error.
+func (r *executionRuntime) AwaitWorkflow(ctx context.Context, ref WorkflowRef) (json.RawMessage, error) {
+	if r == nil || r.service == nil {
 		return nil, errors.New("flow runtime is not configured")
 	}
-	current, err := r.service.store.FindNodeInstanceByID(ctx, r.nodeID)
-	if err != nil {
-		return nil, err
-	}
-	if current.PreviousNodeInstanceID == nil {
-		return nil, nil
-	}
-	nodes, err := r.service.store.ListSystemNodesByPreviousNode(ctx, r.flowInstanceID, *current.PreviousNodeInstanceID)
-	if err != nil {
-		return nil, err
-	}
-	outputs := make([]string, 0, len(nodes))
-	for _, node := range nodes {
-		if node.Status != NodeStatusFinished || node.OutputToken == nil {
-			return nil, errors.New("triggered flow is not finished")
-		}
-		outputs = append(outputs, node.OutputToken.RawData)
-	}
-	return outputs, nil
+	return r.service.AwaitWorkflow(ctx, ref)
 }
 
-// TriggeredFlowOutputsFromRetrySource returns completed child outputs from the
-// failed run whose checkpoint is being retried.
-func (r *executionRuntime) TriggeredFlowOutputsFromRetrySource(ctx context.Context) ([]string, error) {
-	if r == nil || r.service == nil || r.service.store == nil || r.flowInstanceID == 0 || r.nodeIndex <= 0 {
-		return nil, nil
+// GetExecutionContext resolves an instance ID to this service's local
+// execution handle, or to a snapshot loaded from persistence.
+func (r *executionRuntime) GetExecutionContext(ctx context.Context, flowInstanceID uint) (*FlowExecutionContext, error) {
+	if r == nil || r.service == nil {
+		return nil, errors.New("flow runtime is not configured")
 	}
-	current, err := r.service.store.FindFlowInstanceByID(ctx, r.flowInstanceID)
-	if err != nil {
-		return nil, err
-	}
-	retrySourceID := metadataUint(parseFlowMetadata(current.MetadataJSON).Raw["retryOfFlowInstanceId"])
-	visited := map[uint]struct{}{}
-	for depth := 0; retrySourceID > 0 && depth < 32; depth++ {
-		// Follow retry ancestry to find reusable child outputs without looping
-		// indefinitely if persisted metadata contains a cycle.
-		if _, exists := visited[retrySourceID]; exists {
-			return nil, errors.New("workflow retry source contains a cycle")
-		}
-		visited[retrySourceID] = struct{}{}
-		source, loadErr := r.service.store.FindFlowInstanceByID(ctx, retrySourceID)
-		if loadErr != nil {
-			return nil, loadErr
-		}
-		previous := findNodeInstanceByIndex(source.NodeInstances, r.nodeIndex-1)
-		if previous.ID > 0 {
-			// Child results are reusable only when every child of the preceding
-			// checkpoint finished successfully.
-			children, listErr := r.service.store.ListSystemNodesByPreviousNode(ctx, source.ID, previous.ID)
-			if listErr != nil {
-				return nil, listErr
-			}
-			outputs, complete := completedSystemNodeOutputs(children)
-			if complete && len(outputs) > 0 {
-				return outputs, nil
-			}
-		}
-		retrySourceID = metadataUint(parseFlowMetadata(source.MetadataJSON).Raw["retryOfFlowInstanceId"])
-	}
-	return nil, nil
+	return r.service.GetExecutionContext(ctx, flowInstanceID)
 }
 
-// completedSystemNodeOutputs collects child outputs and reports whether every
-// supplied system node completed successfully.
-func completedSystemNodeOutputs(nodes []NodeInstance) ([]string, bool) {
-	outputs := make([]string, 0, len(nodes))
-	for _, node := range nodes {
-		if node.Status != NodeStatusFinished || node.OutputToken == nil {
-			return nil, false
-		}
-		outputs = append(outputs, node.OutputToken.RawData)
-	}
-	return outputs, true
-}
-
-// persistSystemChild creates or reuses the system-node record representing a
-// child-flow request, making dispatch safe to retry after restart.
-func (s *Service) persistSystemChild(ctx context.Context, flowInstanceID uint, nodeID uint, nodeIndex int, triggerIndex int, flowName string, startToken string) error {
-	if flowInstanceID == 0 || nodeID == 0 {
-		return errors.New("flow runtime is not configured")
-	}
-	flowName = strings.TrimSpace(flowName)
-	if flowName == "" {
-		return errors.New("flow name is required")
-	}
-
-	now := time.Now().UTC()
-	if err := s.store.Transaction(ctx, func(tx *Repository) error {
-		instance, err := tx.FindFlowInstanceByID(ctx, flowInstanceID)
-		if err != nil {
-			return err
-		}
-		current := findNodeInstanceByIndex(instance.NodeInstances, nodeIndex)
-		if current.ID == 0 {
-			current, err = tx.FindNodeInstanceByID(ctx, nodeID)
-			if err != nil {
-				return err
-			}
-		}
-		// System-node indexes are unique within a flow instance, not within a
-		// regular node. A resumed parent can therefore trigger children from
-		// several consecutive nodes. Match an existing checkpoint by its owning
-		// parent node and trigger order, then allocate a globally fresh index for
-		// a new child.
-		existingChildren := make([]NodeInstance, 0)
-		for _, existing := range instance.NodeInstances {
-			if !existing.SystemNode || existing.PreviousNodeInstanceID == nil || *existing.PreviousNodeInstanceID != current.ID {
-				continue
-			}
-			existingChildren = append(existingChildren, existing)
-		}
-		sort.Slice(existingChildren, func(left, right int) bool {
-			return existingChildren[left].NodeIndex < existingChildren[right].NodeIndex
-		})
-		if triggerIndex < len(existingChildren) {
-			existing := existingChildren[triggerIndex]
-			if existing.SystemFlowName != flowName || existing.InputToken == nil || existing.InputToken.RawData != startToken {
-				return fmt.Errorf("triggered flow %d of node %d conflicts with its persisted checkpoint", triggerIndex, current.ID)
-			}
-			return nil
-		}
-		systemNodeIndex := nextSystemNodeIndex(instance.NodeInstances)
-		token := &Token{RawData: startToken}
-		if err := tx.CreateToken(ctx, token); err != nil {
-			return err
-		}
-		nodeMetadata := parseFlowMetadata(strings.TrimSpace(instance.MetadataJSON)).Raw
-		if nodeMetadata == nil {
-			nodeMetadata = map[string]any{}
-		}
-		// Carry caller-provided context metadata into the child so generic
-		// cross-node state (for example application guard decisions) survives
-		// asynchronous dispatch.
-		for key, value := range FlowMetadataFromContext(ctx) {
-			nodeMetadata[key] = value
-		}
-		nodeMetadataJSON := ""
-		if len(nodeMetadata) > 0 {
-			encoded, err := json.Marshal(nodeMetadata)
-			if err != nil {
-				return err
-			}
-			nodeMetadataJSON = string(encoded)
-		}
-		created := NodeInstance{
-			Name:                   "__system:follow-up:" + flowName,
-			FlowInstanceID:         flowInstanceID,
-			NodeIndex:              systemNodeIndex,
-			Status:                 NodeStatusQueued,
-			SystemNode:             true,
-			SystemFlowName:         flowName,
-			InputTokenID:           &token.ID,
-			MetadataJSON:           nodeMetadataJSON,
-			PreviousNodeInstanceID: &current.ID,
-			Active:                 false,
-			StartedAt:              now,
-			UpdatedAt:              now,
-		}
-		return tx.CreateNodeInstance(ctx, &created)
-	}); err != nil {
-		return err
-	}
-	return nil
-}
-
-// nextSystemNodeIndex returns the next available index among a flow's system
-// nodes.
-func nextSystemNodeIndex(nodes []NodeInstance) int {
-	const firstSystemNodeIndex = 1000000
-	maxIndex := firstSystemNodeIndex - 1
-	for _, node := range nodes {
-		if node.SystemNode && node.NodeIndex > maxIndex {
-			maxIndex = node.NodeIndex
-		}
-	}
-	return maxIndex + 1
-}
-
-// dispatchTriggeredFlows starts pending child flows persisted for a workflow.
-func (s *Service) dispatchTriggeredFlows(ctx context.Context, flowInstanceID uint) error {
-	nodes, err := s.store.ListQueuedSystemNodesByFlowInstance(ctx, flowInstanceID)
-	if err != nil {
-		return err
-	}
-	for _, node := range nodes {
-		if _, err := s.dispatchSystemNode(ctx, node); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// dispatchSystemNode starts or reconnects the child flow represented by a
-// queued system node.
-func (s *Service) dispatchSystemNode(ctx context.Context, node NodeInstance) (*FlowExecutionContext, error) {
-	if !node.SystemNode {
-		return nil, nil
-	}
-	if node.FlowInstance == nil {
-		instance, err := s.store.FindFlowInstanceByID(ctx, node.FlowInstanceID)
-		if err != nil {
-			return nil, err
-		}
-		node.FlowInstance = &instance
-	}
-	if node.FlowInstance.Status != FlowStatusFinished && node.FlowInstance.Status != FlowStatusWaiting {
-		return nil, nil
-	}
-	startToken := ""
-	if node.InputToken != nil {
-		startToken = node.InputToken.RawData
-	}
-	now := time.Now().UTC()
-	var fresh NodeInstance
-	var shouldStart bool
-	var resumeID *uint
-	if err := s.store.Transaction(ctx, func(tx *Repository) error {
-		loaded, err := tx.FindNodeInstanceByID(ctx, node.ID)
-		if err != nil {
-			return err
-		}
-		switch loaded.Status {
-		case NodeStatusQueued:
-			loaded.Status = NodeStatusRunning
-			loaded.Active = true
-			loaded.StartedAt = now
-			loaded.UpdatedAt = now
-			if err := tx.UpdateNodeInstance(ctx, &loaded); err != nil {
-				return err
-			}
-			fresh = loaded
-			shouldStart = true
-		case NodeStatusRunning:
-			fresh = loaded
-			if loaded.SystemFlowInstanceID != nil {
-				resumeID = loaded.SystemFlowInstanceID
-			} else {
-				shouldStart = true
-			}
-		default:
-			fresh = loaded
-		}
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	if fresh.ID == 0 {
-		return nil, nil
-	}
-	if fresh.Status == NodeStatusFinished || fresh.Status == NodeStatusFailed {
-		return nil, nil
-	}
-	if resumeID != nil {
-		return s.ResumeFlowInstance(ctx, *resumeID)
-	}
-	if !shouldStart {
-		return nil, nil
-	}
-	linked, findLinkedErr := s.store.FindFlowInstanceByParentSystemNodeID(ctx, fresh.ID)
-	if findLinkedErr == nil {
-		if linked.Status == FlowStatusFailed {
-			// Ein Retry darf den fehlgeschlagenen Kindlauf nicht erneut über
-			// parent_system_node_id übernehmen. Der historische Lauf bleibt
-			// erhalten; der Systemknoten erhält anschließend einen neuen Childlauf.
-			if err := s.store.Transaction(ctx, func(tx *Repository) error {
-				oldChild, err := tx.FindFlowInstanceByID(ctx, linked.ID)
-				if err != nil {
-					return err
-				}
-				if oldChild.Status != FlowStatusFailed {
-					return nil
-				}
-				oldChild.ParentSystemNodeID = nil
-				oldChild.UpdatedAt = time.Now().UTC()
-				if err := tx.UpdateFlowInstance(ctx, &oldChild); err != nil {
-					return err
-				}
-				currentNode, err := tx.FindNodeInstanceByID(ctx, fresh.ID)
-				if err != nil {
-					return err
-				}
-				currentNode.SystemFlowInstanceID = nil
-				return tx.UpdateNodeInstance(ctx, &currentNode)
-			}); err != nil {
-				return nil, err
-			}
-			fresh.SystemFlowInstanceID = nil
-		} else if linked.Status == FlowStatusFinished {
-			linkedExec := s.executionFromInstance(linked)
-			if err := s.syncSystemNodeCompletion(ctx, linked.ID, linked.Status, linkedExec.EndToken, linkedExec.Error); err != nil {
-				return nil, err
-			}
-			return linkedExec, nil
-		} else {
-			return s.ResumeFlowInstance(ctx, linked.ID)
-		}
-	}
-	if !errors.Is(findLinkedErr, gorm.ErrRecordNotFound) {
-		return nil, findLinkedErr
-	}
-	parentMetadata := parseFlowMetadata(node.MetadataJSON).Raw
-	if len(parentMetadata) == 0 && node.FlowInstance != nil {
-		parentMetadata = parseFlowMetadata(node.FlowInstance.MetadataJSON).Raw
-	}
-	childMetadata := InheritCorrelationMetadata(parentMetadata, node.FlowInstanceID, node.ID, node.NodeIndex)
-	started, err := s.StartFlow(ctx, node.SystemFlowName, startToken, StartOptions{
-		ParentSystemNodeID: &node.ID,
-		Metadata:           childMetadata,
-		Middlewares:        s.executionStartMiddlewares(node.FlowInstanceID),
-		UserInterfaces:     s.executionUserInterfaces(node.FlowInstanceID),
-	})
-	if err != nil {
-		// Eine parallele Instanz kann den durch parent_system_node_id eindeutig
-		// geschützten Kindlauf zwischen unserer Prüfung und dem Create angelegt
-		// haben. In diesem Fall wird der bestehende Lauf übernommen.
-		if linked, linkedErr := s.store.FindFlowInstanceByParentSystemNodeID(ctx, fresh.ID); linkedErr == nil {
-			if linked.Status == FlowStatusFinished || linked.Status == FlowStatusFailed {
-				linkedExec := s.executionFromInstance(linked)
-				if syncErr := s.syncSystemNodeCompletion(ctx, linked.ID, linked.Status, linkedExec.EndToken, linkedExec.Error); syncErr != nil {
-					return nil, syncErr
-				}
-				return linkedExec, nil
-			}
-			return s.ResumeFlowInstance(ctx, linked.ID)
-		}
-		if updateErr := s.store.Transaction(ctx, func(tx *Repository) error {
-			loaded, loadErr := tx.FindNodeInstanceByID(ctx, node.ID)
-			if loadErr != nil {
-				return loadErr
-			}
-			loaded.Status = NodeStatusFailed
-			loaded.Active = false
-			loaded.ErrorMessage = strings.TrimSpace(err.Error())
-			loaded.ErrorCode = -1
-			loaded.FinishedAt = &now
-			loaded.UpdatedAt = now
-			if err := tx.UpdateNodeInstance(ctx, &loaded); err != nil {
-				return err
-			}
-			parent, parentErr := tx.FindFlowInstanceByID(ctx, loaded.FlowInstanceID)
-			if parentErr != nil {
-				return parentErr
-			}
-			if parent.Status == FlowStatusWaiting {
-				parent.Status = FlowStatusFailed
-				parent.ErrorMessage = loaded.ErrorMessage
-				parent.ErrorCode = -1
-				parent.UpdatedAt = now
-				parent.FinishedAt = &now
-				return tx.UpdateFlowInstance(ctx, &parent)
-			}
-			return nil
-		}); updateErr != nil {
-			return nil, updateErr
-		}
-		return nil, err
-	}
-	return started, nil
-}
-
-// executionStartMiddlewares returns the per-call start middleware inherited by
-// child flows of an active execution. Per-call middleware is process-local and
-// cannot be recovered after a restart.
 func (s *Service) executionStartMiddlewares(flowInstanceID uint) []StartMiddleware {
 	s.mu.RLock()
 	exec := s.active[flowInstanceID]
@@ -2507,92 +1955,6 @@ func (s *Service) executionUserInterfaces(flowInstanceID uint) []any {
 	return userInterfaces
 }
 
-// syncSystemNodeCompletion updates the parent system node from its child flow's
-// terminal status and output.
-func (s *Service) syncSystemNodeCompletion(ctx context.Context, flowInstanceID uint, status FlowStatus, endToken string, execErr error) error {
-	if flowInstanceID == 0 {
-		return nil
-	}
-	instance, err := s.store.FindFlowInstanceSummaryByID(ctx, flowInstanceID)
-	if err != nil {
-		return err
-	}
-	if instance.ParentSystemNodeID == nil || *instance.ParentSystemNodeID == 0 {
-		return nil
-	}
-	now := time.Now().UTC()
-	var resumeParentID uint
-	err = s.store.Transaction(ctx, func(tx *Repository) error {
-		loaded, loadErr := tx.FindNodeInstanceByID(ctx, *instance.ParentSystemNodeID)
-		if loadErr != nil {
-			return loadErr
-		}
-		loaded.Active = false
-		loaded.UpdatedAt = now
-		loaded.FinishedAt = &now
-		loaded.SystemFlowInstanceID = &flowInstanceID
-		if status == FlowStatusFinished {
-			loaded.Status = NodeStatusFinished
-			if strings.TrimSpace(endToken) != "" {
-				token := &Token{RawData: endToken}
-				if err := tx.CreateToken(ctx, token); err != nil {
-					return err
-				}
-				loaded.OutputTokenID = &token.ID
-			}
-		} else if status == FlowStatusFailed {
-			loaded.Status = NodeStatusFailed
-			if execErr != nil {
-				loaded.ErrorMessage = strings.TrimSpace(execErr.Error())
-				loaded.ErrorCode = -1
-			}
-		}
-		if err := tx.UpdateNodeInstance(ctx, &loaded); err != nil {
-			return err
-		}
-		if loaded.PreviousNodeInstanceID == nil {
-			return nil
-		}
-		parent, err := tx.FindFlowInstanceByID(ctx, loaded.FlowInstanceID)
-		if err != nil || parent.Status != FlowStatusWaiting {
-			return err
-		}
-		if status == FlowStatusFailed {
-			parent.Status = FlowStatusFailed
-			parent.ErrorMessage = strings.TrimSpace(loaded.ErrorMessage)
-			parent.ErrorCode = -1
-			parent.UpdatedAt = now
-			parent.FinishedAt = &now
-			return tx.UpdateFlowInstance(ctx, &parent)
-		}
-		if status != FlowStatusFinished {
-			return nil
-		}
-		var outstanding int64
-		if err := tx.db.WithContext(ctx).Model(&NodeInstance{}).Where("flow_instance_id = ? AND system_node = ? AND previous_node_instance_id = ? AND status IN ?", parent.ID, true, *loaded.PreviousNodeInstanceID, []NodeStatus{NodeStatusQueued, NodeStatusRunning}).Count(&outstanding).Error; err != nil {
-			return err
-		}
-		if outstanding == 0 {
-			parent.Status = FlowStatusStopped
-			parent.UpdatedAt = now
-			if err := tx.UpdateFlowInstance(ctx, &parent); err != nil {
-				return err
-			}
-			resumeParentID = parent.ID
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	if resumeParentID != 0 {
-		_, _ = s.ResumeFlowInstance(context.WithoutCancel(ctx), resumeParentID)
-	}
-	return nil
-}
-
-// isActive reports whether an execution handle for the flow is registered in
-// the service's in-memory active index.
 func (s *Service) isActive(flowInstanceID uint) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

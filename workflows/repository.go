@@ -145,34 +145,6 @@ func (r *Repository) FindFlowInstanceByID(ctx context.Context, id uint) (FlowIns
 	return instance, err
 }
 
-// FindFlowInstanceSummaryByID lädt einen Workflow-Lauf ohne gekoppelte Preloads.
-func (r *Repository) FindFlowInstanceSummaryByID(ctx context.Context, id uint) (FlowInstance, error) {
-	var instance FlowInstance
-	err := r.db.WithContext(ctx).
-		Preload("InputToken").
-		Preload("OutputToken").
-		First(&instance, id).Error
-	if err == nil {
-		normalizeLoadedFlowInstance(&instance)
-	}
-	return instance, err
-}
-
-// FindFlowInstanceByParentSystemNodeID findet den eindeutig mit einem
-// System-Knoten verknüpften Kindlauf. Der Link verhindert doppelte Kindläufe,
-// wenn ein Dispatch nach einem Prozessabbruch wiederholt wird.
-func (r *Repository) FindFlowInstanceByParentSystemNodeID(ctx context.Context, parentSystemNodeID uint) (FlowInstance, error) {
-	var instance FlowInstance
-	err := r.flowQuery(ctx).
-		Where("parent_system_node_id = ?", parentSystemNodeID).
-		Order("id desc").
-		First(&instance).Error
-	if err == nil {
-		normalizeLoadedFlowInstance(&instance)
-	}
-	return instance, err
-}
-
 // FindNodeInstanceByID lädt einen einzelnen Knotendatensatz.
 func (r *Repository) FindNodeInstanceByID(ctx context.Context, id uint) (NodeInstance, error) {
 	var node NodeInstance
@@ -186,62 +158,6 @@ func (r *Repository) FindNodeInstanceByID(ctx context.Context, id uint) (NodeIns
 		normalizeLoadedFlowInstance(node.FlowInstance)
 	}
 	return node, err
-}
-
-// ListQueuedSystemNodes liefert alle noch zu dispatchenden oder nach einem
-// Prozessabbruch wiederaufzunehmenden System-Knoten für Folge-Flows.
-func (r *Repository) ListQueuedSystemNodes(ctx context.Context, limit int) ([]NodeInstance, error) {
-	if limit <= 0 {
-		limit = 100
-	}
-	if limit > 500 {
-		limit = 500
-	}
-	items := make([]NodeInstance, 0, limit)
-	err := r.db.WithContext(ctx).
-		Preload("InputToken").
-		Preload("OutputToken").
-		Preload("FlowInstance").
-		Where("system_node = ? AND status IN ?", true, []NodeStatus{NodeStatusQueued, NodeStatusRunning}).
-		Order("updated_at asc").
-		Order("id asc").
-		Limit(limit).
-		Find(&items).Error
-	if err == nil {
-		normalizeLoadedNodeInstances(items)
-	}
-	return items, err
-}
-
-// ListQueuedSystemNodesByFlowInstance liefert wartende System-Knoten eines Flow-Laufs.
-func (r *Repository) ListQueuedSystemNodesByFlowInstance(ctx context.Context, flowInstanceID uint) ([]NodeInstance, error) {
-	items := make([]NodeInstance, 0, 4)
-	err := r.db.WithContext(ctx).
-		Preload("InputToken").
-		Preload("OutputToken").
-		Preload("FlowInstance").
-		Where("flow_instance_id = ? AND system_node = ? AND status = ?", flowInstanceID, true, NodeStatusQueued).
-		Order("node_index asc").
-		Find(&items).Error
-	if err == nil {
-		normalizeLoadedNodeInstances(items)
-	}
-	return items, err
-}
-
-// ListSystemNodesByPreviousNode liefert die aus einem fachlichen Node
-// gestarteten Kindflows samt ihren persistierten Ergebnissen.
-func (r *Repository) ListSystemNodesByPreviousNode(ctx context.Context, flowInstanceID uint, previousNodeID uint) ([]NodeInstance, error) {
-	items := make([]NodeInstance, 0, 4)
-	err := r.db.WithContext(ctx).
-		Preload("OutputToken").
-		Where("flow_instance_id = ? AND system_node = ? AND previous_node_instance_id = ?", flowInstanceID, true, previousNodeID).
-		Order("node_index asc").
-		Find(&items).Error
-	if err == nil {
-		normalizeLoadedNodeInstances(items)
-	}
-	return items, err
 }
 
 // ListResumableFlowInstances liefert alle pausierten oder nicht abgeschlossenen Flows.
@@ -374,14 +290,6 @@ func normalizeLoadedNodeInstance(node *NodeInstance) {
 	}
 	normalizeLoadedToken(node.InputToken)
 	normalizeLoadedToken(node.OutputToken)
-}
-
-// normalizeLoadedNodeInstances normalizes each node in a loaded result set.
-func normalizeLoadedNodeInstances(items []NodeInstance) {
-	for index := range items {
-		normalizeLoadedNodeInstance(&items[index])
-		normalizeLoadedFlowInstance(items[index].FlowInstance)
-	}
 }
 
 // normalizeLoadedToken ensures a loaded token has a usable raw-data value.

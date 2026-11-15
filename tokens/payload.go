@@ -15,6 +15,16 @@ type TokenPayload struct {
 	Meta   map[string]any             `json:"meta,omitempty"`
 }
 
+// FlowError is the standard structured error stored in the error token set.
+type FlowError struct {
+	Message string `json:"message"`
+	Code    string `json:"code"`
+	Data    any    `json:"data"`
+}
+
+// Error makes FlowError usable as a Go error.
+func (e FlowError) Error() string { return e.Message }
+
 // defaultTokenPayloadSchema identifies the serialized token payload format.
 const defaultTokenPayloadSchema = "go-flow.token-payload.v1"
 
