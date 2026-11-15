@@ -81,7 +81,7 @@ func startGreeting(ctx context.Context, db *gorm.DB, name string) (GreetingResul
 	if err != nil {
 		return GreetingResult{}, err
 	}
-	rawResult, err := engine.AwaitWorkflow(ctx, ref)
+	rawResult, err := engine.AwaitFlow(ctx, ref)
 	if err != nil {
 		return GreetingResult{}, err
 	}
@@ -97,10 +97,10 @@ Workflow-Beispiele folgen der Dateireihenfolge: `package` und Imports, ein
 Dokumentationsblock mit `Name` und `Funktion`, die Namenskonstante, der
 dokumentierte `StartToken`-Typ, der dokumentierte `Result`-Typ und danach die
 Implementierung.
-`StartFlow` returns a serializable `WorkflowRef`; pass it to `AwaitWorkflow` to
+`StartFlow` returns a serializable `FlowRef`; pass it to `AwaitFlow` to
 wait for the final result or receive the flow's structured error. Nodes can
-start child workflows the same way through `Runtime.StartWorkflow` and await a
-specific child through `Runtime.AwaitWorkflow`.
+start child workflows the same way through `Runtime.StartFlow` and await a
+specific child through `Runtime.AwaitFlow`.
 
 Registering `tokens/gzip` enables transparent compression for persisted workflow
 tokens. The same package provides the shared payload format:

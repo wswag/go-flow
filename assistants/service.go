@@ -40,7 +40,7 @@ type ClientResultContext struct {
 	Key      StateKey
 	Chain    ChainSnapshot
 	Step     StepSnapshot
-	Workflow *workflows.WorkflowWaitResult
+	Workflow *workflows.FlowWaitResult
 }
 
 // ClientResultFunc defines the allow-list for one assistant step. Returning a
@@ -732,7 +732,7 @@ func (s *Service) WaitClientStep(ctx context.Context, chainName string, key Stat
 			return ClientStepWaitResult{}, referenceErr
 		}
 		if workflowID > 0 {
-			workflow, waitErr := waiter.WaitForWorkflow(ctx, workflowID, workflows.WorkflowWaitOptions{Timeout: timeout})
+			workflow, waitErr := waiter.WaitForFlow(ctx, workflowID, workflows.FlowWaitOptions{Timeout: timeout})
 			if waitErr != nil {
 				return ClientStepWaitResult{}, waitErr
 			}

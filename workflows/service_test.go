@@ -270,9 +270,9 @@ func TestServiceStartFlowDoesNotReuseFailedIdempotentFlow(t *testing.T) {
 	}
 }
 
-// TestServiceRetryFlowInstanceStartsFreshRunAndSupersedesFailure verifies
+// TestServiceRetryFlowStartsFreshRunAndSupersedesFailure verifies
 // retry creates a new run and hides the superseded failure from latest lookups.
-func TestServiceRetryFlowInstanceStartsFreshRunAndSupersedesFailure(t *testing.T) {
+func TestServiceRetryFlowStartsFreshRunAndSupersedesFailure(t *testing.T) {
 	db := openFlowTestDB(t)
 	if err := AutoMigrate(db); err != nil {
 		t.Fatalf("auto migrate flow tables: %v", err)
@@ -304,7 +304,7 @@ func TestServiceRetryFlowInstanceStartsFreshRunAndSupersedesFailure(t *testing.T
 	if failed.Status != FlowStatusFailed || len(failed.NodeInstances) != 1 {
 		t.Fatalf("failed flow state = status %s nodes %d", failed.Status, len(failed.NodeInstances))
 	}
-	retried, err := svc.RetryFlowInstance(context.Background(), failed.ID, failed.NodeInstances[0].ID, "", "edited")
+	retried, err := svc.RetryFlow(context.Background(), failed.ID, failed.NodeInstances[0].ID, "", "edited")
 	if err != nil {
 		t.Fatalf("retry flow: %v", err)
 	}
@@ -332,9 +332,9 @@ func TestServiceRetryFlowInstanceStartsFreshRunAndSupersedesFailure(t *testing.T
 	}
 }
 
-// TestServiceRetryFlowInstanceReusesPersistedCheckpointWithoutRerunningPreviousNodes
+// TestServiceRetryFlowReusesPersistedCheckpointWithoutRerunningPreviousNodes
 // verifies retry resumes from stored checkpoint input without repeating earlier actions.
-func TestServiceRetryFlowInstanceReusesPersistedCheckpointWithoutRerunningPreviousNodes(t *testing.T) {
+func TestServiceRetryFlowReusesPersistedCheckpointWithoutRerunningPreviousNodes(t *testing.T) {
 	db := openFlowTestDB(t)
 	if err := AutoMigrate(db); err != nil {
 		t.Fatalf("auto migrate flow tables: %v", err)
@@ -378,7 +378,7 @@ func TestServiceRetryFlowInstanceReusesPersistedCheckpointWithoutRerunningPrevio
 	if checkpoint.ID == 0 {
 		t.Fatal("retry checkpoint node missing")
 	}
-	retried, err := svc.RetryFlowInstance(context.Background(), failed.ID, checkpoint.ID, "", "ignored-downstream-edit")
+	retried, err := svc.RetryFlow(context.Background(), failed.ID, checkpoint.ID, "", "ignored-downstream-edit")
 	if err != nil {
 		t.Fatalf("retry flow: %v", err)
 	}
@@ -494,11 +494,11 @@ func TestServiceParentAwaitsChildByReference(t *testing.T) {
 			{
 				Name: "trigger",
 				Action: func(ctx context.Context, rawInput string, runtime Runtime) (string, error) {
-					ref, err := runtime.StartWorkflow(ctx, "joined-child", rawInput)
+					ref, err := runtime.StartFlow(ctx, "joined-child", rawInput)
 					if err != nil {
 						return "", err
 					}
-					result, err := runtime.AwaitWorkflow(ctx, ref)
+					result, err := runtime.AwaitFlow(ctx, ref)
 					if err != nil {
 						return "", err
 					}
@@ -547,7 +547,7 @@ func TestServiceMissingChildStartFailsParent(t *testing.T) {
 		Nodes: []FlowNode{{
 			Name: "trigger",
 			Action: func(ctx context.Context, rawInput string, runtime Runtime) (string, error) {
-				_, err := runtime.StartWorkflow(ctx, "missing-child", rawInput)
+				_, err := runtime.StartFlow(ctx, "missing-child", rawInput)
 				if err != nil {
 					return "", err
 				}
@@ -772,11 +772,11 @@ func TestServiceRetryRestartsFailedChildWorkflow(t *testing.T) {
 		Name: "retry-parent",
 		Nodes: []FlowNode{
 			{Name: "trigger", Action: func(ctx context.Context, rawInput string, runtime Runtime) (string, error) {
-				ref, err := runtime.StartWorkflow(ctx, "retry-child", rawInput)
+				ref, err := runtime.StartFlow(ctx, "retry-child", rawInput)
 				if err != nil {
 					return "", err
 				}
-				result, err := runtime.AwaitWorkflow(ctx, ref)
+				result, err := runtime.AwaitFlow(ctx, ref)
 				return string(result), err
 			}},
 			{Name: "finalize", Action: func(context.Context, string, Runtime) (string, error) {
@@ -1003,11 +1003,11 @@ func TestServiceActionCanStartAnotherFlow(t *testing.T) {
 			{
 				Name: "start-child",
 				Action: func(ctx context.Context, rawInput string, runtime Runtime) (string, error) {
-					ref, err := runtime.StartWorkflow(ctx, "child", rawInput)
+					ref, err := runtime.StartFlow(ctx, "child", rawInput)
 					if err != nil {
 						return "", err
 					}
-					result, err := runtime.AwaitWorkflow(ctx, ref)
+					result, err := runtime.AwaitFlow(ctx, ref)
 					if err != nil {
 						return "", err
 					}

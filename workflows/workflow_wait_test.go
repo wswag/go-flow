@@ -9,9 +9,9 @@ import (
 	"github.com/wswag/go-flow/tokens"
 )
 
-// TestWaitForWorkflowReturnsTerminalResultSetsImmediately verifies completed
+// TestWaitForFlowReturnsTerminalResultSetsImmediately verifies completed
 // output sets are returned without waiting for the timeout.
-func TestWaitForWorkflowReturnsTerminalResultSetsImmediately(t *testing.T) {
+func TestWaitForFlowReturnsTerminalResultSetsImmediately(t *testing.T) {
 	db := openFlowTestDB(t)
 	if err := AutoMigrate(db); err != nil {
 		t.Fatal(err)
@@ -35,7 +35,7 @@ func TestWaitForWorkflowReturnsTerminalResultSetsImmediately(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := svc.WaitForWorkflow(context.Background(), instance.ID, WorkflowWaitOptions{Timeout: time.Second})
+	result, err := svc.WaitForFlow(context.Background(), instance.ID, FlowWaitOptions{Timeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,9 +50,9 @@ func TestWaitForWorkflowReturnsTerminalResultSetsImmediately(t *testing.T) {
 	}
 }
 
-// TestWaitForWorkflowReturnsEmptySetsAfterActiveTimeout verifies active output
+// TestWaitForFlowReturnsEmptySetsAfterActiveTimeout verifies active output
 // sets are suppressed when the wait timeout expires.
-func TestWaitForWorkflowReturnsEmptySetsAfterActiveTimeout(t *testing.T) {
+func TestWaitForFlowReturnsEmptySetsAfterActiveTimeout(t *testing.T) {
 	db := openFlowTestDB(t)
 	if err := AutoMigrate(db); err != nil {
 		t.Fatal(err)
@@ -64,7 +64,7 @@ func TestWaitForWorkflowReturnsEmptySetsAfterActiveTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := svc.WaitForWorkflow(context.Background(), instance.ID, WorkflowWaitOptions{Timeout: 15 * time.Millisecond})
+	result, err := svc.WaitForFlow(context.Background(), instance.ID, FlowWaitOptions{Timeout: 15 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,11 +95,11 @@ func TestWaitingParentFailsWhenChildActionFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := svc.RegisterFlow(Flow{Name: "waiting-parent", Nodes: []FlowNode{{Name: "wait", Action: func(ctx context.Context, raw string, runtime Runtime) (string, error) {
-		ref, err := runtime.StartWorkflow(ctx, "failing-child", raw)
+		ref, err := runtime.StartFlow(ctx, "failing-child", raw)
 		if err != nil {
 			return "", err
 		}
-		result, err := runtime.AwaitWorkflow(ctx, ref)
+		result, err := runtime.AwaitFlow(ctx, ref)
 		return string(result), err
 	}}}}); err != nil {
 		t.Fatal(err)
@@ -112,7 +112,7 @@ func TestWaitingParentFailsWhenChildActionFails(t *testing.T) {
 	<-childStarted
 	parent := waitForFlowInstanceByNameAndStatus(t, repo, "waiting-parent", FlowStatusRunning)
 	close(releaseChild)
-	result, err := svc.WaitForWorkflow(context.Background(), parent.ID, WorkflowWaitOptions{Timeout: time.Second})
+	result, err := svc.WaitForFlow(context.Background(), parent.ID, FlowWaitOptions{Timeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -247,12 +247,12 @@ func (s *Service) RegisterActionMiddleware(middleware ActionMiddleware) {
 
 // StartFlow starts a workflow in the background and returns its serializable
 // instance reference. At most one StartOptions value may be provided.
-func (s *Service) StartFlow(ctx context.Context, name string, startToken string, options ...StartOptions) (WorkflowRef, error) {
+func (s *Service) StartFlow(ctx context.Context, name string, startToken string, options ...StartOptions) (FlowRef, error) {
 	exec, err := s.startFlowExecution(ctx, name, startToken, options...)
 	if err != nil {
 		return 0, err
 	}
-	return WorkflowRef(exec.FlowInstanceID), nil
+	return FlowRef(exec.FlowInstanceID), nil
 }
 
 // startFlowExecution runs the start middleware pipeline and returns its
@@ -613,10 +613,10 @@ func (s *Service) ResumeFlowInstance(ctx context.Context, flowInstanceID uint) (
 	return exec, nil
 }
 
-// GetExecutionContext returns the local execution handle for a workflow
+// GetExecutionContextForFlow returns the local execution handle for a workflow
 // instance, or a snapshot reconstructed from persistence when no local handle
 // is active.
-func (s *Service) GetExecutionContext(ctx context.Context, flowInstanceID uint) (*FlowExecutionContext, error) {
+func (s *Service) GetExecutionContextForFlow(ctx context.Context, flowInstanceID uint) (*FlowExecutionContext, error) {
 	if s == nil || s.store == nil {
 		return nil, errors.New("flow store is not configured")
 	}
@@ -636,13 +636,13 @@ func (s *Service) GetExecutionContext(ctx context.Context, flowInstanceID uint) 
 	return s.executionFromInstance(instance), nil
 }
 
-// RetryFlowInstance starts a configured retry as a fresh workflow instance.
+// RetryFlow starts a configured retry as a fresh workflow instance.
 //
 // Reusing the failed instance is only safe when all side effects before the
 // current checkpoint are still present. Some workflows compensate those
 // effects when a downstream branch fails. A fresh run therefore starts at the
 // configured persisted checkpoint, reusing the already generated input token.
-func (s *Service) RetryFlowInstance(ctx context.Context, flowInstanceID uint, nodeID uint, setKey string, value string) (WorkflowRef, error) {
+func (s *Service) RetryFlow(ctx context.Context, flowInstanceID uint, nodeID uint, setKey string, value string) (FlowRef, error) {
 	if s == nil || s.store == nil {
 		return 0, errors.New("flow store is not configured")
 	}
@@ -729,7 +729,7 @@ func (s *Service) RetryFlowInstance(ctx context.Context, flowInstanceID uint, no
 		return 0, err
 	}
 	s.launchExecution(started)
-	return WorkflowRef(started.FlowInstanceID), nil
+	return FlowRef(started.FlowInstanceID), nil
 }
 
 // UpdateCurrentNodeStartToken ersetzt den editierbaren Tokenwert des aktuellen Knotens.
@@ -1884,10 +1884,10 @@ func (r *executionRuntime) CurrentEvent() FlowEvent {
 	return r.currentEvent
 }
 
-// StartWorkflow starts a child workflow and returns its unique serializable
+// StartFlow starts a child workflow and returns its unique serializable
 // instance reference. The child inherits correlation metadata and records this
 // node and workflow as its parent.
-func (r *executionRuntime) StartWorkflow(ctx context.Context, name string, startToken string) (WorkflowRef, error) {
+func (r *executionRuntime) StartFlow(ctx context.Context, name string, startToken string) (FlowRef, error) {
 	if r == nil || r.service == nil || r.service.store == nil {
 		return 0, errors.New("flow runtime is not configured")
 	}
@@ -1912,23 +1912,23 @@ func (r *executionRuntime) StartWorkflow(ctx context.Context, name string, start
 	})
 }
 
-// AwaitWorkflow waits until the referenced workflow completes and returns its
+// AwaitFlow waits until the referenced workflow completes and returns its
 // result as raw JSON. If the workflow fails, its structured error set is
 // returned as an error.
-func (r *executionRuntime) AwaitWorkflow(ctx context.Context, ref WorkflowRef) (json.RawMessage, error) {
+func (r *executionRuntime) AwaitFlow(ctx context.Context, ref FlowRef) (json.RawMessage, error) {
 	if r == nil || r.service == nil {
 		return nil, errors.New("flow runtime is not configured")
 	}
-	return r.service.AwaitWorkflow(ctx, ref)
+	return r.service.AwaitFlow(ctx, ref)
 }
 
-// GetExecutionContext resolves an instance ID to this service's local
+// GetExecutionContextForFlow resolves an instance ID to this service's local
 // execution handle, or to a snapshot loaded from persistence.
-func (r *executionRuntime) GetExecutionContext(ctx context.Context, flowInstanceID uint) (*FlowExecutionContext, error) {
+func (r *executionRuntime) GetExecutionContextForFlow(ctx context.Context, flowInstanceID uint) (*FlowExecutionContext, error) {
 	if r == nil || r.service == nil {
 		return nil, errors.New("flow runtime is not configured")
 	}
-	return r.service.GetExecutionContext(ctx, flowInstanceID)
+	return r.service.GetExecutionContextForFlow(ctx, flowInstanceID)
 }
 
 func (s *Service) executionStartMiddlewares(flowInstanceID uint) []StartMiddleware {

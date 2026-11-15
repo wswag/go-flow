@@ -100,11 +100,11 @@ func TestPerCallStartMiddlewareRunsForStartedChildWorkflow(t *testing.T) {
 		t.Fatalf("register child proxy flow: %v", err)
 	}
 	if err := svc.RegisterFlow(Flow{Name: "parent", Nodes: []FlowNode{{Name: "run", Action: func(ctx context.Context, input string, runtime Runtime) (string, error) {
-		ref, err := runtime.StartWorkflow(ctx, "child", input)
+		ref, err := runtime.StartFlow(ctx, "child", input)
 		if err != nil {
 			return "", err
 		}
-		result, err := runtime.AwaitWorkflow(ctx, ref)
+		result, err := runtime.AwaitFlow(ctx, ref)
 		return string(result), err
 	}}}}); err != nil {
 		t.Fatalf("register parent flow: %v", err)

@@ -29,8 +29,8 @@ const (
 	NodeStatusFailed   NodeStatus = "failed"
 )
 
-// WorkflowRef is the serializable identifier of one workflow instance.
-type WorkflowRef uint
+// FlowRef is the serializable identifier of one workflow instance.
+type FlowRef uint
 
 // Flow beschreibt den ausführbaren Blueprint eines Workflows.
 type Flow struct {
@@ -66,9 +66,12 @@ type Runtime interface {
 	// flow and node names. A non-nil state is stored in the "state" set.
 	NewTokenBuilder(state any) *tokens.TokenBuilder
 	CurrentEvent() FlowEvent
-	StartWorkflow(ctx context.Context, name string, startToken string) (WorkflowRef, error)
-	AwaitWorkflow(ctx context.Context, ref WorkflowRef) (json.RawMessage, error)
-	GetExecutionContext(ctx context.Context, flowInstanceID uint) (*FlowExecutionContext, error)
+	// StartFlow starts a child flow and returns its serializable reference.
+	StartFlow(ctx context.Context, name string, startToken string) (FlowRef, error)
+	// AwaitFlow waits for that reference and returns result JSON or a flow error.
+	AwaitFlow(ctx context.Context, ref FlowRef) (json.RawMessage, error)
+	// GetExecutionContextForFlow resolves an instance ID to its execution context.
+	GetExecutionContextForFlow(ctx context.Context, flowInstanceID uint) (*FlowExecutionContext, error)
 }
 
 // Action führt einen einzelnen Workflow-Schritt aus.
