@@ -1840,7 +1840,7 @@ func parseFlowMetadata(raw string) workflowMetadata {
 // actions.
 func flowNodeContext(metadataJSON string) context.Context {
 	meta := parseFlowMetadata(metadataJSON)
-	return WithFlowMetadata(context.Background(), meta.Raw)
+	return withFlowMetadata(context.Background(), meta.Raw)
 }
 
 type workflowMetadata struct {
@@ -1993,11 +1993,33 @@ func (r *executionRuntime) StartFlow(ctx context.Context, name string, startToke
 	}
 	metadata = EnsureCorrelationMetadata(metadata, r.currentEvent.CorrelationLabel, r.currentEvent.CorrelationDescription)
 	metadata = InheritCorrelationMetadata(metadata, r.flowInstanceID, r.nodeID, r.nodeIndex)
+	startToken, err = inheritFlowMetadataInStartToken(startToken, metadata)
+	if err != nil {
+		return 0, err
+	}
 	return r.service.StartFlow(ctx, name, strings.TrimSpace(startToken), StartOptions{
 		Metadata:       metadata,
 		Middlewares:    r.service.executionStartMiddlewares(r.flowInstanceID),
 		UserInterfaces: r.service.executionUserInterfaces(r.flowInstanceID),
 	})
+}
+
+// inheritFlowMetadataInStartToken adds parent metadata to a child start token
+// without replacing metadata explicitly supplied by the caller.
+func inheritFlowMetadataInStartToken(startToken string, metadata map[string]any) (string, error) {
+	reader := tokens.NewTokenReader(startToken)
+	builder := tokens.NewTokenBuilderFrom(startToken)
+	if reader.Err() != nil {
+		// Preserve legacy plain input strings; they have no token metadata to
+		// merge, and wrapping them here would change the value seen by the child.
+		return startToken, nil
+	}
+	for key, value := range metadata {
+		if _, exists := reader.Meta(key); !exists {
+			builder.Meta(key, value)
+		}
+	}
+	return builder.Build()
 }
 
 // AwaitFlow waits until the referenced workflow completes and returns its
