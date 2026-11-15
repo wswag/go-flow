@@ -23,16 +23,26 @@ type TokenBuilder struct {
 	err                   error
 }
 
-// NewTokenBuilder creates an empty token payload builder.
+// NewTokenBuilder creates an empty token payload builder with state as the
+// primary set and result as the editable set. These selections can be changed
+// with PrimarySet and EditableSet.
 func NewTokenBuilder() *TokenBuilder {
-	return &TokenBuilder{sets: map[string]any{}, meta: map[string]any{}}
+	b := &TokenBuilder{sets: map[string]any{}, meta: map[string]any{}}
+	b.PrimarySet(TokenSetState)
+	b.EditableSet(TokenSetResult)
+	return b
 }
 
 // NewTokenBuilderFrom creates a builder that parses and preserves an existing
-// payload's sets and metadata when Build is called. Invalid or empty input is
-// reported by Build.
+// payload's sets and metadata when Build is called. It defaults to state as
+// the primary set and result as the editable set; these selections can be
+// changed with PrimarySet and EditableSet. Invalid or empty input is reported
+// by Build.
 func NewTokenBuilderFrom(raw string) *TokenBuilder {
-	return &TokenBuilder{raw: raw, mergeExisting: true, sets: map[string]any{}, meta: map[string]any{}}
+	b := &TokenBuilder{raw: raw, mergeExisting: true, sets: map[string]any{}, meta: map[string]any{}}
+	b.PrimarySet(TokenSetState)
+	b.EditableSet(TokenSetResult)
+	return b
 }
 
 // Set adds or replaces a named set. A blank key or invalid value is reported
