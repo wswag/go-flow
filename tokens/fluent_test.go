@@ -37,6 +37,7 @@ func TestTokenBuilderReaderAndEditableSetUpdates(t *testing.T) {
 	}
 
 	merged, err := tokens.NewTokenBuilderFrom(raw).
+		EditableSet("profile").
 		MergeEditableValue(map[string]any{"role": "architect", "active": true}).
 		Build()
 	if err != nil {
@@ -55,6 +56,7 @@ func TestTokenBuilderReaderAndEditableSetUpdates(t *testing.T) {
 	}
 
 	replaced, err := tokens.NewTokenBuilderFrom(merged).
+		EditableSet("profile").
 		EditableValue(map[string]string{"name": "Grace"}).
 		Build()
 	if err != nil {

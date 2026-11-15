@@ -17,8 +17,8 @@ const (
 // serialize it.
 func NewFlowTokenBuilder(flowName, nodeName string, state any) *tokens.TokenBuilder {
 	builder := tokens.NewTokenBuilder().
-		Meta(TokenMetaFlowName, flowName).
-		Meta(TokenMetaFlowNode, nodeName).
+		SetMeta(TokenMetaFlowName, flowName).
+		SetMeta(TokenMetaFlowNode, nodeName).
 		Type(FlowTokenTypeNode)
 	if state != nil {
 		builder.SetState(state)
