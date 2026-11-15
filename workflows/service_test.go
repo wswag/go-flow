@@ -532,6 +532,48 @@ func TestServiceParentAwaitsChildByReference(t *testing.T) {
 	}
 }
 
+func TestInheritFlowMetadataInStartTokenPreservesExplicitValues(t *testing.T) {
+	startToken, err := tokens.NewTokenBuilder().
+		SetInput("child-input").
+		Meta("shared", "child").
+		Meta("child-only", true).
+		Build()
+	if err != nil {
+		t.Fatalf("build child start token: %v", err)
+	}
+
+	got, err := inheritFlowMetadataInStartToken(startToken, map[string]any{
+		"shared":      "parent",
+		"parent-only": "inherited",
+	})
+	if err != nil {
+		t.Fatalf("inherit parent metadata: %v", err)
+	}
+	reader := tokens.NewTokenReader(got)
+	if err := reader.Err(); err != nil {
+		t.Fatalf("read child start token: %v", err)
+	}
+	for key, want := range map[string]any{
+		"shared":      "child",
+		"child-only":  true,
+		"parent-only": "inherited",
+	} {
+		if value, ok := reader.Meta(key); !ok || value != want {
+			t.Errorf("metadata %q = %#v, %v; want %#v", key, value, ok, want)
+		}
+	}
+}
+
+func TestInheritFlowMetadataInStartTokenPreservesLegacyInput(t *testing.T) {
+	got, err := inheritFlowMetadataInStartToken("plain input", map[string]any{"source": "parent"})
+	if err != nil {
+		t.Fatalf("inherit parent metadata: %v", err)
+	}
+	if got != "plain input" {
+		t.Fatalf("start token = %q, want unchanged plain input", got)
+	}
+}
+
 // TestServiceMissingChildStartFailsParent verifies child dispatch errors
 // are propagated to the waiting parent flow.
 func TestServiceMissingChildStartFailsParent(t *testing.T) {

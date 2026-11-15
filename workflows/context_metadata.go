@@ -4,9 +4,10 @@ import "context"
 
 type flowMetadataContextKey struct{}
 
-// WithFlowMetadata returns a context carrying workflow metadata. The flow
-// runtime propagates this metadata to child flows started from the context.
-func WithFlowMetadata(ctx context.Context, metadata map[string]any) context.Context {
+// withFlowMetadata returns a context carrying workflow metadata. Runtime
+// metadata is loaded from persistence for each node; values added here are
+// local to this context and are not persisted or propagated to child flows.
+func withFlowMetadata(ctx context.Context, metadata map[string]any) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -17,8 +18,9 @@ func WithFlowMetadata(ctx context.Context, metadata map[string]any) context.Cont
 	return context.WithValue(ctx, flowMetadataContextKey{}, merged)
 }
 
-// FlowMetadataFromContext returns a copy of metadata carried by ctx, or an
-// empty map when no workflow metadata is present.
+// FlowMetadataFromContext returns a copy of the persisted flow metadata
+// available to the current node through ctx, or an empty map when none is
+// present. Changes to the returned map do not affect the flow or later nodes.
 func FlowMetadataFromContext(ctx context.Context) map[string]any {
 	if ctx == nil {
 		return map[string]any{}
