@@ -540,7 +540,7 @@ func (s *Service) FindActiveFlowByIdempotencyKey(ctx context.Context, name strin
 	if err != nil {
 		return nil, err
 	}
-	return s.ResumeFlowInstance(ctx, instance.ID)
+	return s.ResumeFlowInstance(ctx, FlowRef(instance.ID))
 }
 
 // FindLatestFlowByNameAndCorrelationID lädt den jüngsten Lauf einer
@@ -553,7 +553,7 @@ func (s *Service) FindLatestFlowByNameAndCorrelationID(ctx context.Context, name
 	if err != nil {
 		return nil, err
 	}
-	return s.ResumeFlowInstance(ctx, instance.ID)
+	return s.ResumeFlowInstance(ctx, FlowRef(instance.ID))
 }
 
 // ListLatestFlowInstancesByName returns recent persisted instances without
@@ -584,11 +584,11 @@ func (s *Service) ListResumableFlowInstances(ctx context.Context, limit int) ([]
 
 // FlowEventForInstance baut einen UI-tauglichen Snapshot für einen gespeicherten Flow.
 // Der Snapshot kann für Ticker, Banner und Resume-Ansichten verwendet werden.
-func (s *Service) FlowEventForInstance(ctx context.Context, flowInstanceID uint) (FlowEvent, error) {
+func (s *Service) FlowEventForInstance(ctx context.Context, ref FlowRef) (FlowEvent, error) {
 	if s == nil || s.store == nil {
 		return FlowEvent{}, errors.New("flow store is not configured")
 	}
-	instance, flow, err := s.loadExecutionState(ctx, flowInstanceID)
+	instance, flow, err := s.loadExecutionState(ctx, uint(ref))
 	if err != nil {
 		return FlowEvent{}, err
 	}
@@ -620,7 +620,7 @@ func (s *Service) ResumeStoppedFlows(ctx context.Context) ([]*FlowExecutionConte
 	resumed := make([]*FlowExecutionContext, 0, len(instances))
 	var firstErr error
 	for _, instance := range instances {
-		exec, resumeErr := s.ResumeFlowInstance(ctx, instance.ID)
+		exec, resumeErr := s.ResumeFlowInstance(ctx, FlowRef(instance.ID))
 		if resumeErr != nil {
 			if firstErr == nil {
 				firstErr = resumeErr
@@ -659,10 +659,11 @@ func (s *Service) FlowBlueprint(name string) (Flow, bool) {
 
 // ResumeFlowInstance setzt einen einzelnen gespeicherten Flow-Lauf fort.
 // Bereits aktive Flows werden nicht doppelt gestartet.
-func (s *Service) ResumeFlowInstance(ctx context.Context, flowInstanceID uint) (*FlowExecutionContext, error) {
+func (s *Service) ResumeFlowInstance(ctx context.Context, ref FlowRef) (*FlowExecutionContext, error) {
 	if s == nil || s.store == nil {
 		return nil, errors.New("flow store is not configured")
 	}
+	flowInstanceID := uint(ref)
 	instance, err := s.store.FindFlowInstanceByID(ctx, flowInstanceID)
 	if err != nil {
 		return nil, err
@@ -690,10 +691,11 @@ func (s *Service) ResumeFlowInstance(ctx context.Context, flowInstanceID uint) (
 // GetExecutionContextForFlow returns the local execution handle for a workflow
 // instance, or a snapshot reconstructed from persistence when no local handle
 // is active.
-func (s *Service) GetExecutionContextForFlow(ctx context.Context, flowInstanceID uint) (*FlowExecutionContext, error) {
+func (s *Service) GetExecutionContextForFlow(ctx context.Context, ref FlowRef) (*FlowExecutionContext, error) {
 	if s == nil || s.store == nil {
 		return nil, errors.New("flow store is not configured")
 	}
+	flowInstanceID := uint(ref)
 	if flowInstanceID == 0 {
 		return nil, errors.New("workflow instance is required")
 	}
@@ -716,10 +718,11 @@ func (s *Service) GetExecutionContextForFlow(ctx context.Context, flowInstanceID
 // current checkpoint are still present. Some workflows compensate those
 // effects when a downstream branch fails. A fresh run therefore starts at the
 // configured persisted checkpoint, reusing the already generated input token.
-func (s *Service) RetryFlow(ctx context.Context, flowInstanceID uint, nodeID uint, setKey string, value string) (FlowRef, error) {
+func (s *Service) RetryFlow(ctx context.Context, ref FlowRef, nodeID uint, setKey string, value string) (FlowRef, error) {
 	if s == nil || s.store == nil {
 		return 0, errors.New("flow store is not configured")
 	}
+	flowInstanceID := uint(ref)
 	if flowInstanceID == 0 || nodeID == 0 {
 		return 0, errors.New("flow instance and node are required")
 	}
@@ -798,7 +801,7 @@ func (s *Service) RetryFlow(ctx context.Context, flowInstanceID uint, nodeID uin
 	}
 	// Hide the superseded failure from user-facing "latest failure" lookups,
 	// while retaining the complete failed run for diagnostics and correlation.
-	if err := retryFlowSQLiteBusy(func() error { return s.DiscardFlowInstance(ctx, instance.ID) }); err != nil {
+	if err := retryFlowSQLiteBusy(func() error { return s.DiscardFlowInstance(ctx, FlowRef(instance.ID)) }); err != nil {
 		s.clearActive(started.FlowInstanceID)
 		return 0, err
 	}
@@ -808,14 +811,14 @@ func (s *Service) RetryFlow(ctx context.Context, flowInstanceID uint, nodeID uin
 
 // UpdateCurrentNodeStartToken ersetzt den editierbaren Tokenwert des aktuellen Knotens.
 // Der Flow wird dabei auf den aktuellen Checkpoint zurückgesetzt, damit ein Resume den neuen Wert nutzt.
-func (s *Service) UpdateCurrentNodeStartToken(ctx context.Context, flowInstanceID uint, nodeID uint, value string) error {
-	return s.updateCurrentNodeStartToken(ctx, flowInstanceID, nodeID, "", value)
+func (s *Service) UpdateCurrentNodeStartToken(ctx context.Context, ref FlowRef, nodeID uint, value string) error {
+	return s.updateCurrentNodeStartToken(ctx, uint(ref), nodeID, "", value)
 }
 
 // UpdateCurrentNodeStartTokenSet ersetzt ein explizit ausgewaehltes Set im Start-Token.
 // Der vorherige vollstaendige Token wird in der Rewrite-Historie gesichert.
-func (s *Service) UpdateCurrentNodeStartTokenSet(ctx context.Context, flowInstanceID uint, nodeID uint, setKey string, value string) error {
-	return s.updateCurrentNodeStartToken(ctx, flowInstanceID, nodeID, setKey, value)
+func (s *Service) UpdateCurrentNodeStartTokenSet(ctx context.Context, ref FlowRef, nodeID uint, setKey string, value string) error {
+	return s.updateCurrentNodeStartToken(ctx, uint(ref), nodeID, setKey, value)
 }
 
 // updateCurrentNodeStartToken persists an edit to the current node's input
@@ -968,10 +971,11 @@ func rewritePrimaryTokenPayloadSet(raw string, value string) (string, error) {
 
 // DiscardFlowInstance markiert einen fehlgeschlagenen Flow als verworfen.
 // Dadurch verschwindet der Lauf aus der Nutzeransicht, bleibt aber historisch erhalten.
-func (s *Service) DiscardFlowInstance(ctx context.Context, flowInstanceID uint) error {
+func (s *Service) DiscardFlowInstance(ctx context.Context, ref FlowRef) error {
 	if s == nil || s.store == nil {
 		return errors.New("flow store is not configured")
 	}
+	flowInstanceID := uint(ref)
 	if flowInstanceID == 0 {
 		return errors.New("flow instance is required")
 	}
@@ -989,7 +993,7 @@ func (s *Service) DiscardFlowInstance(ctx context.Context, flowInstanceID uint) 
 		return tx.UpdateFlowInstance(ctx, &instance)
 	})
 	if err == nil {
-		if event, eventErr := s.FlowEventForInstance(ctx, flowInstanceID); eventErr == nil {
+		if event, eventErr := s.FlowEventForInstance(ctx, ref); eventErr == nil {
 			event.BannerAvailable = false
 			event.Message = "Workflow verworfen"
 			s.broadcastFlowEvent(event)
@@ -1204,10 +1208,11 @@ func (s *Service) broadcastTerminal(ctx context.Context, event FlowEvent) {
 // FlowStartToken returns the raw input token supplied when a flow instance
 // started. The returned token can be decoded with the generic helpers in the
 // tokens package.
-func (s *Service) FlowStartToken(ctx context.Context, flowInstanceID uint) (string, error) {
+func (s *Service) FlowStartToken(ctx context.Context, ref FlowRef) (string, error) {
 	if s == nil || s.store == nil {
 		return "", errors.New("flow store is not configured")
 	}
+	flowInstanceID := uint(ref)
 	instance, err := s.store.FindFlowInstanceByID(ctx, flowInstanceID)
 	if err != nil {
 		return "", err
@@ -1221,8 +1226,8 @@ func (s *Service) FlowStartToken(ctx context.Context, flowInstanceID uint) (stri
 // DecodeFlowStartTokenSet decodes a named set from a flow instance's start
 // token. Use DecodeFlowStartTokenMetaSet when the set name is stored in token
 // metadata.
-func (s *Service) DecodeFlowStartTokenSet(ctx context.Context, flowInstanceID uint, setKey string, target any) error {
-	raw, err := s.FlowStartToken(ctx, flowInstanceID)
+func (s *Service) DecodeFlowStartTokenSet(ctx context.Context, ref FlowRef, setKey string, target any) error {
+	raw, err := s.FlowStartToken(ctx, ref)
 	if err != nil {
 		return err
 	}
@@ -1231,8 +1236,8 @@ func (s *Service) DecodeFlowStartTokenSet(ctx context.Context, flowInstanceID ui
 
 // DecodeFlowStartTokenMetaSet decodes the set whose name is referenced by the
 // given metadata key in a flow instance's start token.
-func (s *Service) DecodeFlowStartTokenMetaSet(ctx context.Context, flowInstanceID uint, metaKey string, target any) error {
-	raw, err := s.FlowStartToken(ctx, flowInstanceID)
+func (s *Service) DecodeFlowStartTokenMetaSet(ctx context.Context, ref FlowRef, metaKey string, target any) error {
+	raw, err := s.FlowStartToken(ctx, ref)
 	if err != nil {
 		return err
 	}
@@ -2007,11 +2012,11 @@ func (r *executionRuntime) AwaitFlow(ctx context.Context, ref FlowRef) (json.Raw
 
 // GetExecutionContextForFlow resolves an instance ID to this service's local
 // execution handle, or to a snapshot loaded from persistence.
-func (r *executionRuntime) GetExecutionContextForFlow(ctx context.Context, flowInstanceID uint) (*FlowExecutionContext, error) {
+func (r *executionRuntime) GetExecutionContextForFlow(ctx context.Context, ref FlowRef) (*FlowExecutionContext, error) {
 	if r == nil || r.service == nil {
 		return nil, errors.New("flow runtime is not configured")
 	}
-	return r.service.GetExecutionContextForFlow(ctx, flowInstanceID)
+	return r.service.GetExecutionContextForFlow(ctx, ref)
 }
 
 func (s *Service) executionStartMiddlewares(flowInstanceID uint) []StartMiddleware {
