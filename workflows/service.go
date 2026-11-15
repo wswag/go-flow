@@ -2015,8 +2015,8 @@ func inheritFlowMetadataInStartToken(startToken string, metadata map[string]any)
 		return startToken, nil
 	}
 	for key, value := range metadata {
-		if _, exists := reader.Meta(key); !exists {
-			builder.Meta(key, value)
+		if _, exists := reader.MetaValue(key); !exists {
+			builder.SetMeta(key, value)
 		}
 	}
 	return builder.Build()

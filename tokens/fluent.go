@@ -1,6 +1,7 @@
 package tokens
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -84,8 +85,9 @@ func (b *TokenBuilder) SetError(value FlowError) *TokenBuilder {
 	return b.Set(TokenSetError, value)
 }
 
-// Meta adds or replaces a metadata entry.
-func (b *TokenBuilder) Meta(key string, value any) *TokenBuilder {
+// SetMeta adds or replaces a metadata entry. Values are serialized as JSON
+// when Build is called and can be decoded with TokenReader.Meta.
+func (b *TokenBuilder) SetMeta(key string, value any) *TokenBuilder {
 	key = strings.TrimSpace(key)
 	if key == "" {
 		b.err = fmt.Errorf("token metadata key is empty")
@@ -219,8 +221,29 @@ func (r *TokenReader) String(key string) string {
 	return TokenPayloadSetString(r.payload, key)
 }
 
-// Meta returns a metadata value and whether the key exists.
-func (r *TokenReader) Meta(key string) (any, bool) {
+// Meta decodes a metadata value into target. It returns an error when the
+// metadata key is absent or its JSON value cannot be decoded.
+func (r *TokenReader) Meta(key string, target any) error {
+	if r.err != nil {
+		return r.err
+	}
+	key = strings.TrimSpace(key)
+	value, ok := r.payload.Meta[key]
+	if !ok {
+		return fmt.Errorf("token payload has no metadata %q", key)
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("marshal token metadata %q: %w", key, err)
+	}
+	if err := json.Unmarshal(encoded, target); err != nil {
+		return fmt.Errorf("decode token metadata %q: %w", key, err)
+	}
+	return nil
+}
+
+// MetaValue returns a metadata value and whether the key exists.
+func (r *TokenReader) MetaValue(key string) (any, bool) {
 	if r.err != nil {
 		return nil, false
 	}
