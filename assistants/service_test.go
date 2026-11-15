@@ -1073,10 +1073,10 @@ func TestAssistantStepContextBuildsTaggedToken(t *testing.T) {
 	if err := reader.Err(); err != nil {
 		t.Fatalf("read assistant token: %v", err)
 	}
-	if got, ok := reader.Meta(TokenMetaAssistantName); !ok || got != "onboarding" {
+	if got, ok := reader.MetaValue(TokenMetaAssistantName); !ok || got != "onboarding" {
 		t.Fatalf("assistant metadata = %#v, want onboarding", got)
 	}
-	if got, ok := reader.Meta(TokenMetaAssistantStep); !ok || got != "profile" {
+	if got, ok := reader.MetaValue(TokenMetaAssistantStep); !ok || got != "profile" {
 		t.Fatalf("step metadata = %#v, want profile", got)
 	}
 	if got := reader.Type(); got != AssistantTokenTypeStep {
@@ -1101,7 +1101,7 @@ func TestAssistantStepContextBuildsTaggedToken(t *testing.T) {
 	if err := commitReader.Err(); err != nil {
 		t.Fatalf("read commit token: %v", err)
 	}
-	if step, ok := commitReader.Meta(TokenMetaAssistantStep); !ok || step != "review" {
+	if step, ok := commitReader.MetaValue(TokenMetaAssistantStep); !ok || step != "review" {
 		t.Fatalf("commit step metadata = %#v, want review", step)
 	}
 }

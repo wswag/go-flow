@@ -203,10 +203,10 @@ func TestRuntimeNewTokenBuilderUsesCurrentFlowAndNode(t *testing.T) {
 	if err := reader.Err(); err != nil {
 		t.Fatalf("read runtime token: %v", err)
 	}
-	if flowName, ok := reader.Meta(TokenMetaFlowName); !ok || flowName != "runtime-flow" {
+	if flowName, ok := reader.MetaValue(TokenMetaFlowName); !ok || flowName != "runtime-flow" {
 		t.Fatalf("flow metadata = %#v, want runtime-flow", flowName)
 	}
-	if nodeName, ok := reader.Meta(TokenMetaFlowNode); !ok || nodeName != "prepare-state" {
+	if nodeName, ok := reader.MetaValue(TokenMetaFlowNode); !ok || nodeName != "prepare-state" {
 		t.Fatalf("node metadata = %#v, want prepare-state", nodeName)
 	}
 	if got := reader.Type(); got != FlowTokenTypeNode {

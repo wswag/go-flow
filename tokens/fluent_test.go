@@ -13,7 +13,7 @@ func TestTokenBuilderReaderAndEditableSetUpdates(t *testing.T) {
 		EditableSet("profile").
 		PrimarySet("untouched").
 		Type("example").
-		Meta("source", "test").
+		SetMeta("source", "test").
 		Build()
 	if err != nil {
 		t.Fatalf("build token: %v", err)
@@ -32,7 +32,7 @@ func TestTokenBuilderReaderAndEditableSetUpdates(t *testing.T) {
 	if got := reader.Type(); got != "example" {
 		t.Fatalf("type = %q, want example", got)
 	}
-	if value, ok := reader.Meta("source"); !ok || value != "test" {
+	if value, ok := reader.MetaValue("source"); !ok || value != "test" {
 		t.Fatalf("source metadata = %#v, present=%t", value, ok)
 	}
 
@@ -67,5 +67,26 @@ func TestTokenBuilderReaderAndEditableSetUpdates(t *testing.T) {
 	}
 	if len(profile) != 1 || profile["name"] != "Grace" {
 		t.Fatalf("replaced profile = %#v", profile)
+	}
+}
+
+func TestTokenBuilderReaderRoundTripsObjectMetadata(t *testing.T) {
+	type requestMetadata struct {
+		Tenant string   `json:"tenant"`
+		Scopes []string `json:"scopes"`
+	}
+	want := requestMetadata{Tenant: "acme", Scopes: []string{"read", "write"}}
+	raw, err := tokens.NewTokenBuilder().SetMeta("request", want).Build()
+	if err != nil {
+		t.Fatalf("build token: %v", err)
+	}
+
+	reader := tokens.NewTokenReader(raw)
+	var got requestMetadata
+	if err := reader.Meta("request", &got); err != nil {
+		t.Fatalf("decode object metadata: %v", err)
+	}
+	if got.Tenant != want.Tenant || len(got.Scopes) != len(want.Scopes) || got.Scopes[0] != want.Scopes[0] || got.Scopes[1] != want.Scopes[1] {
+		t.Fatalf("metadata = %#v, want %#v", got, want)
 	}
 }

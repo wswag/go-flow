@@ -558,7 +558,7 @@ func TestInheritFlowMetadataInStartTokenPreservesExplicitValues(t *testing.T) {
 		"child-only":  true,
 		"parent-only": "inherited",
 	} {
-		if value, ok := reader.Meta(key); !ok || value != want {
+		if value, ok := reader.MetaValue(key); !ok || value != want {
 			t.Errorf("metadata %q = %#v, %v; want %#v", key, value, ok, want)
 		}
 	}
