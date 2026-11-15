@@ -52,7 +52,7 @@ func registerGreetingFlow(engine *workflows.Service) error {
 					return "", err
 				}
 				var start GreetingStartToken
-				if err := reader.Decode("start", &start); err != nil {
+				if err := reader.Input(&start); err != nil {
 					return "", err
 				}
 				return tokens.NewTokenBuilder().
@@ -72,7 +72,7 @@ func startGreeting(ctx context.Context, db *gorm.DB, name string) (GreetingResul
 		return GreetingResult{}, err
 	}
 	startToken, err := tokens.NewTokenBuilder().
-		Set("start", GreetingStartToken{Name: name}).
+		SetInput(GreetingStartToken{Name: name}).
 		Build()
 	if err != nil {
 		return GreetingResult{}, err

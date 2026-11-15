@@ -336,7 +336,10 @@ func hasIdempotencyMiddleware(middlewares []StartMiddleware, service *Service) b
 
 func (s *Service) startFlowCore(ctx context.Context, request StartRequest) (*FlowExecutionContext, error) {
 	name := request.FlowName
-	startToken := request.StartToken
+	startToken, err := flowStartInputToken(request.StartToken)
+	if err != nil {
+		return nil, err
+	}
 	startOptions := request.Options
 	exec, err := s.startFlowAtNode(
 		ctx, name, startToken, 0, startOptions, true,
@@ -345,6 +348,77 @@ func (s *Service) startFlowCore(ctx context.Context, request StartRequest) (*Flo
 		return nil, err
 	}
 	return exec, nil
+}
+
+// flowStartInputToken normalizes a supplied start token to the value consumed
+// by the first node. A single existing set is treated as the start value;
+// multi-set payloads are kept together as an object. Already normalized input
+// tokens pass through unchanged.
+func flowStartInputToken(raw string) (string, error) {
+	payload, err := tokens.ParseTokenPayload(raw)
+	if err != nil {
+		return tokens.NewTokenBuilder().SetInput(strings.TrimSpace(raw)).Build()
+	}
+	if _, ok := payload.Sets[tokens.TokenSetInput]; ok {
+		delete(payload.Sets, tokens.TokenSetResult)
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return "", err
+		}
+		return tokens.NewTokenBuilderFrom(string(encoded)).EditableSet(tokens.TokenSetInput).Build()
+	}
+	var input any
+	if value, ok := payload.Sets[tokens.TokenSetResult]; ok {
+		if err := json.Unmarshal(value, &input); err != nil {
+			return "", err
+		}
+	} else if len(payload.Sets) == 1 {
+		for _, value := range payload.Sets {
+			if err := json.Unmarshal(value, &input); err != nil {
+				return "", err
+			}
+		}
+	} else {
+		sets := make(map[string]json.RawMessage, len(payload.Sets))
+		for key, value := range payload.Sets {
+			sets[key] = value
+		}
+		input = sets
+	}
+	delete(payload.Sets, tokens.TokenSetResult)
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return tokens.NewTokenBuilderFrom(string(encoded)).SetInput(input).EditableSet(tokens.TokenSetInput).Build()
+}
+
+// flowResultToInputToken copies only the result set into the input set and
+// removes result from the next node's input token. Other sets and metadata are
+// preserved; the original output token remains unchanged for result retrieval.
+func flowResultToInputToken(raw string) (string, error) {
+	payload, err := tokens.ParseTokenPayload(raw)
+	if err != nil {
+		return tokens.NewTokenBuilder().SetInput(strings.TrimSpace(raw)).Build()
+	}
+	value, ok := payload.Sets[tokens.TokenSetResult]
+	if !ok {
+		return tokens.NewTokenBuilder().SetInput(raw).Build()
+	}
+	var input any
+	if err := json.Unmarshal(value, &input); err != nil {
+		return "", err
+	}
+	delete(payload.Sets, tokens.TokenSetResult)
+	payload.Sets[tokens.TokenSetInput], err = json.Marshal(input)
+	if err != nil {
+		return "", err
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return tokens.NewTokenBuilderFrom(string(encoded)).EditableSet(tokens.TokenSetInput).Build()
 }
 
 // startFlowAtNode validates, persists, and optionally launches a flow at a
@@ -1473,13 +1547,14 @@ func (s *Service) commitNodeOutput(ctx context.Context, flowInstanceID uint, nod
 		if err != nil {
 			return err
 		}
-		// The same token becomes both the node output and the next node input.
-		token := &Token{RawData: output}
-		if err := tx.CreateToken(ctx, token); err != nil {
+		// Keep the node output intact for flow results and persist a separate input
+		// token for the next node, with result moved to input.
+		outputToken := &Token{RawData: output}
+		if err := tx.CreateToken(ctx, outputToken); err != nil {
 			return err
 		}
-		node.OutputTokenID = &token.ID
-		node.OutputToken = token
+		node.OutputTokenID = &outputToken.ID
+		node.OutputToken = outputToken
 		node.Status = NodeStatusFinished
 		node.Active = false
 		node.UpdatedAt = now
@@ -1487,12 +1562,20 @@ func (s *Service) commitNodeOutput(ctx context.Context, flowInstanceID uint, nod
 		if err := tx.UpdateNodeInstance(ctx, &node); err != nil {
 			return err
 		}
-		fresh.OutputTokenID = &token.ID
-		fresh.OutputToken = token
+		fresh.OutputTokenID = &outputToken.ID
+		fresh.OutputToken = outputToken
 		fresh.UpdatedAt = now
 		fresh.CurrentNodeIndex = nodeIndex + 1
 		// Create the next node now so resume always has a durable checkpoint.
 		if nodeIndex+1 < len(flow.Nodes) {
+			nextInputRaw, inputErr := flowResultToInputToken(output)
+			if inputErr != nil {
+				return inputErr
+			}
+			inputToken := &Token{RawData: nextInputRaw}
+			if err := tx.CreateToken(ctx, inputToken); err != nil {
+				return err
+			}
 			fresh.Status = FlowStatusStopped
 			next := &NodeInstance{
 				Name:                   flow.Nodes[nodeIndex+1].Name,
@@ -1500,7 +1583,7 @@ func (s *Service) commitNodeOutput(ctx context.Context, flowInstanceID uint, nod
 				NodeIndex:              nodeIndex + 1,
 				Status:                 NodeStatusQueued,
 				MetadataJSON:           strings.TrimSpace(fresh.MetadataJSON),
-				InputTokenID:           &token.ID,
+				InputTokenID:           &inputToken.ID,
 				Active:                 true,
 				StartedAt:              now,
 				UpdatedAt:              now,

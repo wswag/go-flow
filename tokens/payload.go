@@ -36,6 +36,9 @@ const (
 // TokenSetResult is the named token set used for a result.
 const TokenSetResult = "result"
 
+// TokenSetInput is the named token set used for a node's input.
+const TokenSetInput = "input"
+
 // TokenSetState is the named token set used for state.
 const TokenSetState = "state"
 
