@@ -304,7 +304,7 @@ func TestServiceRetryFlowStartsFreshRunAndSupersedesFailure(t *testing.T) {
 	if failed.Status != FlowStatusFailed || len(failed.NodeInstances) != 1 {
 		t.Fatalf("failed flow state = status %s nodes %d", failed.Status, len(failed.NodeInstances))
 	}
-	retried, err := svc.RetryFlow(context.Background(), failed.ID, failed.NodeInstances[0].ID, "", "edited")
+	retried, err := svc.RetryFlow(context.Background(), FlowRef(failed.ID), failed.NodeInstances[0].ID, "", "edited")
 	if err != nil {
 		t.Fatalf("retry flow: %v", err)
 	}
@@ -378,7 +378,7 @@ func TestServiceRetryFlowReusesPersistedCheckpointWithoutRerunningPreviousNodes(
 	if checkpoint.ID == 0 {
 		t.Fatal("retry checkpoint node missing")
 	}
-	retried, err := svc.RetryFlow(context.Background(), failed.ID, checkpoint.ID, "", "ignored-downstream-edit")
+	retried, err := svc.RetryFlow(context.Background(), FlowRef(failed.ID), checkpoint.ID, "", "ignored-downstream-edit")
 	if err != nil {
 		t.Fatalf("retry flow: %v", err)
 	}
@@ -718,7 +718,7 @@ func TestTerminalHookCanDecodeStartTokenSetThroughService(t *testing.T) {
 	hookErr := make(chan error, 1)
 	svc.RegisterTerminalHook(func(ctx context.Context, engine *Service, event FlowEvent) {
 		var decoded state
-		err := engine.DecodeFlowStartTokenSet(ctx, event.FlowInstanceID, tokens.TokenSetState, &decoded)
+		err := engine.DecodeFlowStartTokenSet(ctx, FlowRef(event.FlowInstanceID), tokens.TokenSetState, &decoded)
 		if err != nil {
 			hookErr <- err
 			return
@@ -807,10 +807,10 @@ func TestServiceRetryRestartsFailedChildWorkflow(t *testing.T) {
 		t.Fatalf("load retry node: %v", err)
 	}
 	oldCorrelation := parseFlowMetadata(failedParent.MetadataJSON).CorrelationID
-	if err := svc.UpdateCurrentNodeStartToken(context.Background(), failedParent.ID, retryNode.ID, startToken); err != nil {
+	if err := svc.UpdateCurrentNodeStartToken(context.Background(), FlowRef(failedParent.ID), retryNode.ID, startToken); err != nil {
 		t.Fatalf("update retry token: %v", err)
 	}
-	if _, err := svc.ResumeFlowInstance(context.Background(), failedParent.ID); err != nil {
+	if _, err := svc.ResumeFlowInstance(context.Background(), FlowRef(failedParent.ID)); err != nil {
 		t.Fatalf("resume retried parent: %v", err)
 	}
 	retriedParent := waitForFlowInstanceByNameAndStatus(t, repo, "retry-parent", FlowStatusFinished)
@@ -1089,7 +1089,7 @@ func TestServiceDiscardFlowInstanceMarksCheckpointAsHidden(t *testing.T) {
 		t.Fatalf("expected finished execution, got %s", exec.Status)
 	}
 
-	if err := svc.DiscardFlowInstance(context.Background(), exec.FlowInstanceID); err != nil {
+	if err := svc.DiscardFlowInstance(context.Background(), FlowRef(exec.FlowInstanceID)); err != nil {
 		t.Fatalf("discard flow: %v", err)
 	}
 
@@ -1103,7 +1103,7 @@ func TestServiceDiscardFlowInstanceMarksCheckpointAsHidden(t *testing.T) {
 	if persisted.Status != FlowStatusFinished {
 		t.Fatalf("discard must not change finished status, got %s", persisted.Status)
 	}
-	event, err := svc.FlowEventForInstance(context.Background(), exec.FlowInstanceID)
+	event, err := svc.FlowEventForInstance(context.Background(), FlowRef(exec.FlowInstanceID))
 	if err != nil {
 		t.Fatalf("load workflow event: %v", err)
 	}

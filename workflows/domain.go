@@ -70,8 +70,8 @@ type Runtime interface {
 	StartFlow(ctx context.Context, name string, startToken string) (FlowRef, error)
 	// AwaitFlow waits for that reference and returns result JSON or a flow error.
 	AwaitFlow(ctx context.Context, ref FlowRef) (json.RawMessage, error)
-	// GetExecutionContextForFlow resolves an instance ID to its execution context.
-	GetExecutionContextForFlow(ctx context.Context, flowInstanceID uint) (*FlowExecutionContext, error)
+	// GetExecutionContextForFlow resolves a flow reference to its execution context.
+	GetExecutionContextForFlow(ctx context.Context, ref FlowRef) (*FlowExecutionContext, error)
 }
 
 // Action führt einen einzelnen Workflow-Schritt aus.
