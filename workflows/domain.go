@@ -2,6 +2,7 @@ package workflows
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/wswag/go-flow/tokens"
@@ -27,6 +28,9 @@ const (
 	NodeStatusFinished NodeStatus = "finished"
 	NodeStatusFailed   NodeStatus = "failed"
 )
+
+// WorkflowRef is the serializable identifier of one workflow instance.
+type WorkflowRef uint
 
 // Flow beschreibt den ausführbaren Blueprint eines Workflows.
 type Flow struct {
@@ -62,16 +66,9 @@ type Runtime interface {
 	// flow and node names. A non-nil state is stored in the "state" set.
 	NewTokenBuilder(state any) *tokens.TokenBuilder
 	CurrentEvent() FlowEvent
-	TriggerFlow(ctx context.Context, name string, startToken string) error
-	WaitForTriggeredFlows(ctx context.Context) error
-	TriggeredFlowOutputs(ctx context.Context) ([]string, error)
-}
-
-// RetrySourceRuntime exposes completed child outputs from the superseded run
-// that supplied the selected retry checkpoint. It is an optional capability
-// for nodes whose checkpoint input still depends on a completed child flow.
-type RetrySourceRuntime interface {
-	TriggeredFlowOutputsFromRetrySource(ctx context.Context) ([]string, error)
+	StartWorkflow(ctx context.Context, name string, startToken string) (WorkflowRef, error)
+	AwaitWorkflow(ctx context.Context, ref WorkflowRef) (json.RawMessage, error)
+	GetExecutionContext(ctx context.Context, flowInstanceID uint) (*FlowExecutionContext, error)
 }
 
 // Action führt einen einzelnen Workflow-Schritt aus.
@@ -100,9 +97,7 @@ type FlowExecutionContext struct {
 	engineUserInterfaces []any
 }
 
-// StartOptions describes optional behavior for StartFlow. TargetFlowName
-// makes StartFlow start a wrapper flow and return an execution handle that
-// follows the matching triggered child flow.
+// StartOptions describes optional behavior for StartFlow.
 type StartOptions struct {
 	// Metadata is persisted with the flow instance and its initial node.
 	Metadata map[string]any
@@ -111,16 +106,10 @@ type StartOptions struct {
 	// middleware at the end of the chain unless it is already present.
 	IdempotencyKey string
 
-	// ParentSystemNodeID links a child flow to the system node that dispatched it.
-	ParentSystemNodeID *uint
-	// TargetFlowName asks StartFlow to return a handle that follows this
-	// triggered child of the started flow.
-	TargetFlowName string
 	// Middlewares adds middleware for this StartFlow call after engine-level
 	// middleware. The chain is fixed when StartFlow is called; changes to this
-	// slice from within a middleware do not alter the active chain. While this
-	// execution is active, the same middleware also runs for its triggered child
-	// flows.
+	// slice from within a middleware do not alter the active chain. Child
+	// workflows started from this execution inherit these middleware.
 	Middlewares []StartMiddleware
 	// ActionMiddlewares wraps each node action in this execution after
 	// engine-level action middleware. These functions are process-local and are
@@ -219,24 +208,23 @@ func (c *FlowExecutionContext) Done() <-chan struct{} {
 
 // FlowInstance speichert einen gesamten Workflow-Lauf mit Checkpoints.
 type FlowInstance struct {
-	ID                 uint       `gorm:"primaryKey"`
-	Name               string     `gorm:"index"`
-	Status             FlowStatus `gorm:"index"`
-	IdempotencyKey     string     `gorm:"index"`
-	CurrentNodeIndex   int        `gorm:"index"`
-	InputTokenID       *uint      `gorm:"index"`
-	OutputTokenID      *uint      `gorm:"index"`
-	ParentSystemNodeID *uint      `gorm:"uniqueIndex:ux_flow_instances_parent_system_node"`
-	MetadataJSON       string     `gorm:"type:text"`
-	ErrorMessage       string     `gorm:"type:text"`
-	ErrorCode          int
-	DiscardedAt        *time.Time     `gorm:"index"`
-	StartedAt          time.Time      `gorm:"index"`
-	UpdatedAt          time.Time      `gorm:"index"`
-	FinishedAt         *time.Time     `gorm:"index"`
-	InputToken         *Token         `gorm:"foreignKey:InputTokenID"`
-	OutputToken        *Token         `gorm:"foreignKey:OutputTokenID"`
-	NodeInstances      []NodeInstance `gorm:"foreignKey:FlowInstanceID"`
+	ID               uint       `gorm:"primaryKey"`
+	Name             string     `gorm:"index"`
+	Status           FlowStatus `gorm:"index"`
+	IdempotencyKey   string     `gorm:"index"`
+	CurrentNodeIndex int        `gorm:"index"`
+	InputTokenID     *uint      `gorm:"index"`
+	OutputTokenID    *uint      `gorm:"index"`
+	MetadataJSON     string     `gorm:"type:text"`
+	ErrorMessage     string     `gorm:"type:text"`
+	ErrorCode        int
+	DiscardedAt      *time.Time     `gorm:"index"`
+	StartedAt        time.Time      `gorm:"index"`
+	UpdatedAt        time.Time      `gorm:"index"`
+	FinishedAt       *time.Time     `gorm:"index"`
+	InputToken       *Token         `gorm:"foreignKey:InputTokenID"`
+	OutputToken      *Token         `gorm:"foreignKey:OutputTokenID"`
+	NodeInstances    []NodeInstance `gorm:"foreignKey:FlowInstanceID"`
 }
 
 // NodeInstance speichert einen einzelnen Knoten innerhalb eines Flow-Laufs.
@@ -246,9 +234,6 @@ type NodeInstance struct {
 	FlowInstanceID         uint       `gorm:"index;uniqueIndex:idx_flow_node_index,priority:1"`
 	NodeIndex              int        `gorm:"index;uniqueIndex:idx_flow_node_index,priority:2"`
 	Status                 NodeStatus `gorm:"index"`
-	SystemNode             bool       `gorm:"index"`
-	SystemFlowName         string     `gorm:"index"`
-	SystemFlowInstanceID   *uint      `gorm:"index"`
 	InputTokenID           *uint      `gorm:"index"`
 	OutputTokenID          *uint      `gorm:"index"`
 	MetadataJSON           string     `gorm:"type:text"`

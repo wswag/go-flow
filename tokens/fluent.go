@@ -63,8 +63,8 @@ func (b *TokenBuilder) SetState(value any) *TokenBuilder {
 	return b.Set(TokenSetState, value)
 }
 
-// SetError stores structured error information for the flow.
-func (b *TokenBuilder) SetError(value any) *TokenBuilder {
+// SetError stores structured error information.
+func (b *TokenBuilder) SetError(value FlowError) *TokenBuilder {
 	return b.Set(TokenSetError, value)
 }
 
@@ -257,9 +257,13 @@ func (r *TokenReader) State(target any) error {
 	return r.Decode(TokenSetState, target)
 }
 
-// Error decodes structured flow error information into target.
-func (r *TokenReader) Error(target any) error {
-	return r.Decode(TokenSetError, target)
+// Error decodes and returns structured error information.
+func (r *TokenReader) Error() (FlowError, error) {
+	var result FlowError
+	if err := r.Decode(TokenSetError, &result); err != nil {
+		return FlowError{}, err
+	}
+	return result, nil
 }
 
 // DecodeMetaSet resolves a set key from metadata and decodes that set into

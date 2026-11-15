@@ -41,7 +41,7 @@ func TestFlowUserInterfaceCanBeResolvedFromNode(t *testing.T) {
 		t.Fatalf("register flow: %v", err)
 	}
 
-	exec, err := svc.StartFlow(context.Background(), "dependency-flow", "input")
+	exec, err := svc.startFlowExecution(context.Background(), "dependency-flow", "input")
 	if err != nil {
 		t.Fatalf("start flow: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestGetInterfaceRejectsAmbiguousRegistrations(t *testing.T) {
 		t.Fatalf("register flow: %v", err)
 	}
 
-	exec, err := svc.StartFlow(context.Background(), "ambiguous-dependency-flow", "input")
+	exec, err := svc.startFlowExecution(context.Background(), "ambiguous-dependency-flow", "input")
 	if err != nil {
 		t.Fatalf("start flow: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestStartMiddlewareCanResolveFlowUserInterface(t *testing.T) {
 		return next(ctx, request)
 	}))
 
-	if _, err := svc.StartFlow(context.Background(), "start-middleware-dependency-flow", "input"); err != nil {
+	if _, err := svc.startFlowExecution(context.Background(), "start-middleware-dependency-flow", "input"); err != nil {
 		t.Fatalf("start flow: %v", err)
 	}
 	select {
@@ -145,7 +145,7 @@ func TestCallUserInterfaceOverridesFlowDefinitionInMiddlewareAndNode(t *testing.
 		return next(ctx, request)
 	}))
 
-	exec, err := svc.StartFlow(context.Background(), "call-dependency-flow", "input", StartOptions{
+	exec, err := svc.startFlowExecution(context.Background(), "call-dependency-flow", "input", StartOptions{
 		UserInterfaces: []any{testGreeterValue("call value")},
 	})
 	if err != nil {
@@ -211,7 +211,7 @@ func TestEngineUserInterfacesAreLowestPriorityAndAvailableInMiddleware(t *testin
 		}
 	}))
 
-	exec, err := svc.StartFlow(context.Background(), "engine-dependency-flow", "input")
+	exec, err := svc.startFlowExecution(context.Background(), "engine-dependency-flow", "input")
 	if err != nil {
 		t.Fatalf("start flow: %v", err)
 	}

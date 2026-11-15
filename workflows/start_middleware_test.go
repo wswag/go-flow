@@ -32,7 +32,7 @@ func TestStartMiddlewaresUseSequenceAcrossEngineFlowAndCall(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("register flow: %v", err)
 	}
-	exec, err := svc.StartFlow(context.Background(), "sequenced-flow", "input", StartOptions{
+	exec, err := svc.startFlowExecution(context.Background(), "sequenced-flow", "input", StartOptions{
 		Middlewares: []StartMiddleware{NewSequencedStartMiddleware(10, middleware("call"))},
 	})
 	if err != nil {
@@ -63,7 +63,7 @@ func TestStartMiddlewareRedirectsFlowAndToken(t *testing.T) {
 		return next(ctx, request)
 	}))
 
-	exec, err := svc.StartFlow(context.Background(), "requested", "input")
+	exec, err := svc.startFlowExecution(context.Background(), "requested", "input")
 	if err != nil {
 		t.Fatalf("start redirected flow: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestStartMiddlewareRedirectsFlowAndToken(t *testing.T) {
 func TestPerCallStartMiddlewareCanReturnExistingExecution(t *testing.T) {
 	svc := NewService(nil)
 	existing := &FlowExecutionContext{FlowName: "existing", FlowInstanceID: 42}
-	exec, err := svc.StartFlow(context.Background(), "not-registered", "ignored", StartOptions{
+	exec, err := svc.startFlowExecution(context.Background(), "not-registered", "ignored", StartOptions{
 		Middlewares: []StartMiddleware{StartMiddlewareFunc(func(_ context.Context, _ StartRequest, _ StartFlowNext) (*FlowExecutionContext, error) {
 			return existing, nil
 		})},
@@ -89,21 +89,23 @@ func TestPerCallStartMiddlewareCanReturnExistingExecution(t *testing.T) {
 	}
 }
 
-func TestPerCallStartMiddlewareRunsForTriggeredChildFlow(t *testing.T) {
+func TestPerCallStartMiddlewareRunsForStartedChildWorkflow(t *testing.T) {
 	svc := NewService(NewRepository(openFlowTestDB(t)))
 	if err := AutoMigrate(svc.store.db); err != nil {
 		t.Fatalf("auto migrate flow tables: %v", err)
 	}
 	if err := svc.RegisterFlow(Flow{Name: "child-proxy", Nodes: []FlowNode{{Name: "run", Action: func(_ context.Context, input string, _ Runtime) (string, error) {
-		return input + "-child-proxy", nil
+		return tokens.NewTokenBuilder().SetResult(input + "-child-proxy").Build()
 	}}}}); err != nil {
 		t.Fatalf("register child proxy flow: %v", err)
 	}
 	if err := svc.RegisterFlow(Flow{Name: "parent", Nodes: []FlowNode{{Name: "run", Action: func(ctx context.Context, input string, runtime Runtime) (string, error) {
-		if err := runtime.TriggerFlow(ctx, "child", input); err != nil {
+		ref, err := runtime.StartWorkflow(ctx, "child", input)
+		if err != nil {
 			return "", err
 		}
-		return input, nil
+		result, err := runtime.AwaitWorkflow(ctx, ref)
+		return string(result), err
 	}}}}); err != nil {
 		t.Fatalf("register parent flow: %v", err)
 	}
@@ -115,7 +117,7 @@ func TestPerCallStartMiddlewareRunsForTriggeredChildFlow(t *testing.T) {
 		return next(ctx, request)
 	}))
 	childMiddlewareCalled := make(chan struct{}, 1)
-	exec, err := svc.StartFlow(context.Background(), "parent", "input", StartOptions{
+	exec, err := svc.startFlowExecution(context.Background(), "parent", "input", StartOptions{
 		Middlewares: []StartMiddleware{StartMiddlewareFunc(func(ctx context.Context, request StartRequest, next StartFlowNext) (*FlowExecutionContext, error) {
 			if request.FlowName == "child" {
 				childMiddlewareCalled <- struct{}{}
@@ -130,16 +132,20 @@ func TestPerCallStartMiddlewareRunsForTriggeredChildFlow(t *testing.T) {
 	select {
 	case <-childMiddlewareCalled:
 	case <-time.After(3 * time.Second):
-		t.Fatal("per-call middleware was not invoked for triggered child flow")
+		t.Fatal("per-call middleware was not invoked for started child workflow")
 	}
 	select {
 	case <-engineChildMiddlewareCalled:
 	case <-time.After(3 * time.Second):
-		t.Fatal("engine middleware was not invoked for triggered child flow")
+		t.Fatal("engine middleware was not invoked for started child workflow")
 	}
 	child := waitForFlowInstanceByNameAndStatus(t, svc.store, "child-proxy", FlowStatusFinished)
-	if child.OutputToken == nil || child.OutputToken.RawData != "input-child-proxy" {
-		t.Fatalf("triggered child output = %#v", child.OutputToken)
+	if child.OutputToken == nil {
+		t.Fatalf("started child output = %#v", child.OutputToken)
+	}
+	var childResult string
+	if err := tokens.NewTokenReader(child.OutputToken.RawData).Result(&childResult); err != nil || childResult != "input-child-proxy" {
+		t.Fatalf("child result = %q, error %v", childResult, err)
 	}
 	waitForDone(t, exec.Done())
 }
@@ -161,7 +167,7 @@ func TestActionMiddlewaresComposeForEngineAndPerCall(t *testing.T) {
 		}
 	}))
 
-	exec, err := svc.StartFlow(context.Background(), "action-middleware", "input", StartOptions{
+	exec, err := svc.startFlowExecution(context.Background(), "action-middleware", "input", StartOptions{
 		ActionMiddlewares: []ActionMiddleware{ActionMiddlewareFunc(func(next Action) Action {
 			return func(ctx context.Context, input string, runtime Runtime) (string, error) {
 				output, err := next(ctx, input, runtime)
@@ -188,7 +194,7 @@ func TestRuntimeNewTokenBuilderUsesCurrentFlowAndNode(t *testing.T) {
 	}}}}); err != nil {
 		t.Fatalf("register flow: %v", err)
 	}
-	exec, err := svc.StartFlow(context.Background(), "runtime-flow", "input")
+	exec, err := svc.startFlowExecution(context.Background(), "runtime-flow", "input")
 	if err != nil {
 		t.Fatalf("start flow: %v", err)
 	}

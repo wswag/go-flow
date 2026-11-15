@@ -26,9 +26,50 @@ type WorkflowWaitOptions struct {
 // Timeouts bleiben sie bewusst leer, damit Zwischenstände nicht als Ergebnis
 // missverstanden werden.
 type WorkflowWaitResult struct {
-	Status     FlowStatus                 `json:"status"`
-	Metadata   map[string]any             `json:"metadata"`
-	ResultSets map[string]json.RawMessage `json:"resultSets"`
+	Status       FlowStatus                 `json:"status"`
+	ErrorMessage string                     `json:"errorMessage,omitempty"`
+	Metadata     map[string]any             `json:"metadata"`
+	ResultSets   map[string]json.RawMessage `json:"resultSets"`
+}
+
+// AwaitWorkflow waits until a workflow instance reaches a terminal state. It
+// returns the raw JSON value stored in the result set, or the structured flow
+// error when the instance failed. Context cancellation stops the wait.
+func (s *Service) AwaitWorkflow(ctx context.Context, ref WorkflowRef) (json.RawMessage, error) {
+	if ref == 0 {
+		return nil, errors.New("workflow reference is required")
+	}
+	for {
+		result, err := s.WaitForWorkflow(ctx, uint(ref), WorkflowWaitOptions{Timeout: DefaultWorkflowWaitTimeout})
+		if err != nil {
+			return nil, err
+		}
+		switch result.Status {
+		case FlowStatusFinished:
+			raw, ok := result.ResultSets[tokens.TokenSetResult]
+			if !ok {
+				return nil, errors.New("workflow result is missing")
+			}
+			return append(json.RawMessage(nil), raw...), nil
+		case FlowStatusFailed:
+			flowError, err := result.Error()
+			if err == nil {
+				return nil, flowError
+			}
+			if strings.TrimSpace(result.ErrorMessage) != "" {
+				return nil, errors.New(strings.TrimSpace(result.ErrorMessage))
+			}
+			return nil, errors.New("workflow failed")
+		default:
+			// Stopped is a persisted checkpoint between two nodes. Keep waiting
+			// until the execution resumes or the caller cancels the context.
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(25 * time.Millisecond):
+			}
+		}
+	}
 }
 
 // Result decodes the result set into target. The final node must write
@@ -44,16 +85,17 @@ func (r WorkflowWaitResult) Result(target any) error {
 	return nil
 }
 
-// Error decodes the error set into target.
-func (r WorkflowWaitResult) Error(target any) error {
+// Error decodes and returns the structured error set.
+func (r WorkflowWaitResult) Error() (tokens.FlowError, error) {
 	raw, ok := r.ResultSets[tokens.TokenSetError]
 	if !ok {
-		return errors.New("workflow error details are missing")
+		return tokens.FlowError{}, errors.New("workflow error details are missing")
 	}
-	if err := json.Unmarshal(raw, target); err != nil {
-		return fmt.Errorf("decode workflow error details: %w", err)
+	var result tokens.FlowError
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return tokens.FlowError{}, fmt.Errorf("decode workflow error details: %w", err)
 	}
-	return nil
+	return result, nil
 }
 
 // WaitForWorkflow wartet bis ein einzelner Lauf nicht mehr aktiv ist oder das
@@ -124,9 +166,10 @@ func (s *Service) workflowWaitSnapshot(ctx context.Context, workflowID uint, sup
 		return WorkflowWaitResult{}, err
 	}
 	result := WorkflowWaitResult{
-		Status:     instance.Status,
-		Metadata:   cloneWorkflowWaitMetadata(parseFlowMetadata(instance.MetadataJSON).Raw),
-		ResultSets: map[string]json.RawMessage{},
+		Status:       instance.Status,
+		ErrorMessage: instance.ErrorMessage,
+		Metadata:     cloneWorkflowWaitMetadata(parseFlowMetadata(instance.MetadataJSON).Raw),
+		ResultSets:   map[string]json.RawMessage{},
 	}
 	if suppressActiveSets && workflowWaitActive(instance.Status) {
 		return result, nil

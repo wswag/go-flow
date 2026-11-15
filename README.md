@@ -18,6 +18,7 @@ package example
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/wswag/go-flow/tokens"
 	_ "github.com/wswag/go-flow/tokens/gzip" // registers the gz: storage codec
@@ -62,22 +63,33 @@ func registerGreetingFlow(engine *workflows.Service) error {
 	})
 }
 
-func startGreeting(ctx context.Context, db *gorm.DB, name string) error {
+func startGreeting(ctx context.Context, db *gorm.DB, name string) (GreetingResult, error) {
 	if err := workflows.AutoMigrate(db); err != nil {
-		return err
+		return GreetingResult{}, err
 	}
 	engine := workflows.NewService(workflows.NewRepository(db))
 	if err := registerGreetingFlow(engine); err != nil {
-		return err
+		return GreetingResult{}, err
 	}
 	startToken, err := tokens.NewTokenBuilder().
 		Set("start", GreetingStartToken{Name: name}).
 		Build()
 	if err != nil {
-		return err
+		return GreetingResult{}, err
 	}
-	_, err = engine.StartFlow(ctx, GreetingFlowName, startToken)
-	return err
+	ref, err := engine.StartFlow(ctx, GreetingFlowName, startToken)
+	if err != nil {
+		return GreetingResult{}, err
+	}
+	rawResult, err := engine.AwaitWorkflow(ctx, ref)
+	if err != nil {
+		return GreetingResult{}, err
+	}
+	var result GreetingResult
+	if err := json.Unmarshal(rawResult, &result); err != nil {
+		return GreetingResult{}, err
+	}
+	return result, nil
 }
 ```
 
@@ -85,6 +97,10 @@ Workflow-Beispiele folgen der Dateireihenfolge: `package` und Imports, ein
 Dokumentationsblock mit `Name` und `Funktion`, die Namenskonstante, der
 dokumentierte `StartToken`-Typ, der dokumentierte `Result`-Typ und danach die
 Implementierung.
+`StartFlow` returns a serializable `WorkflowRef`; pass it to `AwaitWorkflow` to
+wait for the final result or receive the flow's structured error. Nodes can
+start child workflows the same way through `Runtime.StartWorkflow` and await a
+specific child through `Runtime.AwaitWorkflow`.
 
 Registering `tokens/gzip` enables transparent compression for persisted workflow
 tokens. The same package provides the shared payload format:

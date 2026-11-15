@@ -2,6 +2,7 @@ package workflows
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync/atomic"
@@ -188,7 +189,7 @@ func TestServiceStartFlowReusesActiveIdempotentFlow(t *testing.T) {
 		t.Fatalf("register flow: %v", err)
 	}
 
-	first, err := svc.StartFlow(context.Background(), "idempotent-flow", "start-token", StartOptions{
+	first, err := svc.startFlowExecution(context.Background(), "idempotent-flow", "start-token", StartOptions{
 		IdempotencyKey: "scope:7:image:abc",
 	})
 	if err != nil {
@@ -200,7 +201,7 @@ func TestServiceStartFlowReusesActiveIdempotentFlow(t *testing.T) {
 		t.Fatal("expected first flow to start")
 	}
 
-	second, err := svc.StartFlow(context.Background(), "idempotent-flow", "different-token", StartOptions{
+	second, err := svc.startFlowExecution(context.Background(), "idempotent-flow", "different-token", StartOptions{
 		IdempotencyKey: "scope:7:image:abc",
 	})
 	if err != nil {
@@ -251,7 +252,7 @@ func TestServiceStartFlowDoesNotReuseFailedIdempotentFlow(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("register flow: %v", err)
 	}
-	first, err := svc.StartFlow(context.Background(), "failed-idempotent-flow", "first", StartOptions{IdempotencyKey: "retry-key"})
+	first, err := svc.startFlowExecution(context.Background(), "failed-idempotent-flow", "first", StartOptions{IdempotencyKey: "retry-key"})
 	if err != nil {
 		t.Fatalf("start first flow: %v", err)
 	}
@@ -259,7 +260,7 @@ func TestServiceStartFlowDoesNotReuseFailedIdempotentFlow(t *testing.T) {
 	if first.Status != FlowStatusFailed {
 		t.Fatalf("first flow status = %s, want failed", first.Status)
 	}
-	second, err := svc.StartFlow(context.Background(), "failed-idempotent-flow", "second", StartOptions{IdempotencyKey: "retry-key"})
+	second, err := svc.startFlowExecution(context.Background(), "failed-idempotent-flow", "second", StartOptions{IdempotencyKey: "retry-key"})
 	if err != nil {
 		t.Fatalf("start second flow: %v", err)
 	}
@@ -291,7 +292,7 @@ func TestServiceRetryFlowInstanceStartsFreshRunAndSupersedesFailure(t *testing.T
 	}); err != nil {
 		t.Fatalf("register flow: %v", err)
 	}
-	first, err := svc.StartFlow(context.Background(), "fresh-retry-flow", testEditablePayload(t, "original"))
+	first, err := svc.startFlowExecution(context.Background(), "fresh-retry-flow", testEditablePayload(t, "original"))
 	if err != nil {
 		t.Fatalf("start first flow: %v", err)
 	}
@@ -307,12 +308,16 @@ func TestServiceRetryFlowInstanceStartsFreshRunAndSupersedesFailure(t *testing.T
 	if err != nil {
 		t.Fatalf("retry flow: %v", err)
 	}
-	waitForDone(t, retried.Done())
-	if retried.FlowInstanceID == failed.ID {
+	waitForFlowInstanceByNameAndStatus(t, repo, failed.Name, FlowStatusFinished)
+	retriedInstance, err := repo.FindFlowInstanceByID(context.Background(), uint(retried))
+	if err != nil {
+		t.Fatalf("load retried flow: %v", err)
+	}
+	if retriedInstance.ID == failed.ID {
 		t.Fatalf("retry reused failed flow %d", failed.ID)
 	}
-	if retried.Status != FlowStatusFinished {
-		t.Fatalf("retried flow status = %s, want finished", retried.Status)
+	if retriedInstance.Status != FlowStatusFinished {
+		t.Fatalf("retried flow status = %s, want finished", retriedInstance.Status)
 	}
 	updatedFailed, err := repo.FindFlowInstanceByID(context.Background(), failed.ID)
 	if err != nil {
@@ -321,9 +326,9 @@ func TestServiceRetryFlowInstanceStartsFreshRunAndSupersedesFailure(t *testing.T
 	if updatedFailed.DiscardedAt == nil {
 		t.Fatal("superseded failed flow is still visible")
 	}
-	payload, err := tokens.ParseTokenPayload(retried.StartToken)
+	payload, err := tokens.ParseTokenPayload(retriedInstance.InputToken.RawData)
 	if err != nil || tokens.TokenPayloadSetString(payload, "value") != "edited" {
-		t.Fatalf("retried start token = %q, want edited value (error: %v)", retried.StartToken, err)
+		t.Fatalf("retried start token = %q, want edited value (error: %v)", retriedInstance.InputToken.RawData, err)
 	}
 }
 
@@ -357,7 +362,7 @@ func TestServiceRetryFlowInstanceReusesPersistedCheckpointWithoutRerunningPrevio
 	}); err != nil {
 		t.Fatalf("register flow: %v", err)
 	}
-	first, err := svc.StartFlow(context.Background(), "checkpoint-retry-flow", "request")
+	first, err := svc.startFlowExecution(context.Background(), "checkpoint-retry-flow", "request")
 	if err != nil {
 		t.Fatalf("start first flow: %v", err)
 	}
@@ -377,13 +382,17 @@ func TestServiceRetryFlowInstanceReusesPersistedCheckpointWithoutRerunningPrevio
 	if err != nil {
 		t.Fatalf("retry flow: %v", err)
 	}
-	waitForDone(t, retried.Done())
-	if retried.Status != FlowStatusFinished {
-		t.Fatalf("retried flow status = %s, want finished", retried.Status)
+	waitForFlowInstanceByNameAndStatus(t, repo, failed.Name, FlowStatusFinished)
+	retriedInstance, err := repo.FindFlowInstanceByID(context.Background(), uint(retried))
+	if err != nil {
+		t.Fatalf("load retried flow: %v", err)
 	}
-	payload, err := tokens.ParseTokenPayload(retried.StartToken)
+	if retriedInstance.Status != FlowStatusFinished {
+		t.Fatalf("retried flow status = %s, want finished", retriedInstance.Status)
+	}
+	payload, err := tokens.ParseTokenPayload(retriedInstance.InputToken.RawData)
 	if err != nil || tokens.TokenPayloadSetString(payload, "value") != "ignored-downstream-edit" {
-		t.Fatalf("retried checkpoint token = %q, want edited value (error: %v)", retried.StartToken, err)
+		t.Fatalf("retried checkpoint token = %q, want edited value (error: %v)", retriedInstance.InputToken.RawData, err)
 	}
 	if generationAttempts.Load() != 1 {
 		t.Fatalf("generation attempts = %d, want one persisted generation", generationAttempts.Load())
@@ -456,141 +465,9 @@ func TestRepositoryTreatsWaitingFlowAsResumableAndActive(t *testing.T) {
 	}
 }
 
-// TestServiceResumeQueuedSystemNodesDispatchesWaitingParentChild verifies
-// queued child-flow requests survive and resume after restart.
-func TestServiceResumeQueuedSystemNodesDispatchesWaitingParentChild(t *testing.T) {
-	db := openFlowTestDB(t)
-	if err := AutoMigrate(db); err != nil {
-		t.Fatalf("auto migrate flow tables: %v", err)
-	}
-
-	repo := NewRepository(db)
-	svc := NewService(repo)
-	if err := svc.RegisterFlow(Flow{
-		Name: "child",
-		Nodes: []FlowNode{{
-			Name: "run",
-			Action: func(ctx context.Context, rawInput string, runtime Runtime) (string, error) {
-				return rawInput + "-done", nil
-			},
-		}},
-	}); err != nil {
-		t.Fatalf("register child flow: %v", err)
-	}
-
-	ctx := context.Background()
-	now := time.Now().UTC()
-	input := &Token{RawData: "child-input"}
-	if err := repo.CreateToken(ctx, input); err != nil {
-		t.Fatalf("create child input: %v", err)
-	}
-	parent := &FlowInstance{
-		Name:      "parent",
-		Status:    FlowStatusWaiting,
-		StartedAt: now,
-		UpdatedAt: now,
-	}
-	if err := repo.CreateFlowInstance(ctx, parent); err != nil {
-		t.Fatalf("create waiting parent: %v", err)
-	}
-	systemNode := &NodeInstance{
-		Name:           "__system:follow-up:child",
-		FlowInstanceID: parent.ID,
-		NodeIndex:      1000000,
-		Status:         NodeStatusQueued,
-		SystemNode:     true,
-		SystemFlowName: "child",
-		InputTokenID:   &input.ID,
-		StartedAt:      now,
-		UpdatedAt:      now,
-	}
-	if err := repo.CreateNodeInstance(ctx, systemNode); err != nil {
-		t.Fatalf("create queued system node: %v", err)
-	}
-
-	executions, err := svc.ResumeQueuedSystemNodes(ctx)
-	if err != nil {
-		t.Fatalf("resume queued system nodes: %v", err)
-	}
-	if len(executions) != 1 {
-		t.Fatalf("expected one dispatched child, got %d", len(executions))
-	}
-	waitForDone(t, executions[0].Done())
-	if executions[0].Status != FlowStatusFinished {
-		t.Fatalf("expected child to finish, got %s", executions[0].Status)
-	}
-	persistedNode, err := repo.FindNodeInstanceByID(ctx, systemNode.ID)
-	if err != nil {
-		t.Fatalf("load system node: %v", err)
-	}
-	if persistedNode.Status != NodeStatusFinished {
-		t.Fatalf("expected system node to finish, got %s", persistedNode.Status)
-	}
-}
-
-// TestServiceResumeQueuedSystemNodesRecoversRunningNodeWithoutChildLink verifies
-// recovery repairs a dispatch interrupted before the child link was stored.
-func TestServiceResumeQueuedSystemNodesRecoversRunningNodeWithoutChildLink(t *testing.T) {
-	db := openFlowTestDB(t)
-	if err := AutoMigrate(db); err != nil {
-		t.Fatalf("auto migrate flow tables: %v", err)
-	}
-
-	repo := NewRepository(db)
-	svc := NewService(repo)
-	if err := svc.RegisterFlow(Flow{
-		Name: "recovered-child",
-		Nodes: []FlowNode{{
-			Name: "run",
-			Action: func(ctx context.Context, rawInput string, runtime Runtime) (string, error) {
-				return rawInput + "-done", nil
-			},
-		}},
-	}); err != nil {
-		t.Fatalf("register child flow: %v", err)
-	}
-
-	ctx := context.Background()
-	now := time.Now().UTC()
-	input := &Token{RawData: "child-input"}
-	if err := repo.CreateToken(ctx, input); err != nil {
-		t.Fatalf("create input: %v", err)
-	}
-	parent := &FlowInstance{Name: "parent", Status: FlowStatusWaiting, StartedAt: now, UpdatedAt: now}
-	if err := repo.CreateFlowInstance(ctx, parent); err != nil {
-		t.Fatalf("create parent: %v", err)
-	}
-	node := &NodeInstance{
-		Name:           "__system:follow-up:recovered-child",
-		FlowInstanceID: parent.ID,
-		NodeIndex:      1000000,
-		Status:         NodeStatusRunning,
-		SystemNode:     true,
-		SystemFlowName: "recovered-child",
-		InputTokenID:   &input.ID,
-		StartedAt:      now,
-		UpdatedAt:      now,
-	}
-	if err := repo.CreateNodeInstance(ctx, node); err != nil {
-		t.Fatalf("create interrupted system node: %v", err)
-	}
-
-	executions, err := svc.ResumeQueuedSystemNodes(ctx)
-	if err != nil {
-		t.Fatalf("recover running system node: %v", err)
-	}
-	if len(executions) != 1 {
-		t.Fatalf("expected one recovered child, got %d", len(executions))
-	}
-	waitForDone(t, executions[0].Done())
-	if executions[0].Status != FlowStatusFinished {
-		t.Fatalf("expected recovered child to finish, got %s", executions[0].Status)
-	}
-}
-
-// TestServiceWaitForTriggeredFlowsPersistsWaitingCheckpointAndContinues verifies
-// a parent resumes after its triggered children complete.
-func TestServiceWaitForTriggeredFlowsPersistsWaitingCheckpointAndContinues(t *testing.T) {
+// TestServiceParentAwaitsChildByReference verifies
+// the parent node receives the child result through its explicit reference.
+func TestServiceParentAwaitsChildByReference(t *testing.T) {
 	db := openFlowTestDB(t)
 	if err := AutoMigrate(db); err != nil {
 		t.Fatalf("auto migrate flow tables: %v", err)
@@ -605,7 +482,7 @@ func TestServiceWaitForTriggeredFlowsPersistsWaitingCheckpointAndContinues(t *te
 			Name: "run",
 			Action: func(ctx context.Context, rawInput string, runtime Runtime) (string, error) {
 				<-releaseChild
-				return rawInput + "-child", nil
+				return tokens.NewTokenBuilder().SetResult(rawInput + "-child").Build()
 			},
 		}},
 	}); err != nil {
@@ -617,47 +494,33 @@ func TestServiceWaitForTriggeredFlowsPersistsWaitingCheckpointAndContinues(t *te
 			{
 				Name: "trigger",
 				Action: func(ctx context.Context, rawInput string, runtime Runtime) (string, error) {
-					if err := runtime.TriggerFlow(ctx, "joined-child", rawInput); err != nil {
-						return "", err
-					}
-					if err := runtime.WaitForTriggeredFlows(ctx); err != nil {
-						return "", err
-					}
-					return rawInput + "-waiting", nil
-				},
-			},
-			{
-				Name: "apply",
-				Action: func(ctx context.Context, rawInput string, runtime Runtime) (string, error) {
-					outputs, err := runtime.TriggeredFlowOutputs(ctx)
+					ref, err := runtime.StartWorkflow(ctx, "joined-child", rawInput)
 					if err != nil {
 						return "", err
 					}
-					if len(outputs) != 1 {
-						return "", fmt.Errorf("expected one child output, got %d", len(outputs))
+					result, err := runtime.AwaitWorkflow(ctx, ref)
+					if err != nil {
+						return "", err
 					}
-					return rawInput + "|" + outputs[0], nil
+					var childResult string
+					if err := json.Unmarshal(result, &childResult); err != nil {
+						return "", err
+					}
+					return rawInput + "-waiting|" + childResult, nil
 				},
+			},
+			{
+				Name:   "apply",
+				Action: func(_ context.Context, rawInput string, _ Runtime) (string, error) { return rawInput, nil },
 			},
 		},
 	}); err != nil {
 		t.Fatalf("register parent flow: %v", err)
 	}
 
-	exec, err := svc.StartFlow(context.Background(), "joined-parent", "start")
+	exec, err := svc.startFlowExecution(context.Background(), "joined-parent", "start")
 	if err != nil {
 		t.Fatalf("start parent: %v", err)
-	}
-	parent := waitForFlowInstanceByNameAndStatus(t, repo, "joined-parent", FlowStatusWaiting)
-	parent, err = repo.FindFlowInstanceByID(context.Background(), parent.ID)
-	if err != nil {
-		t.Fatalf("load waiting parent checkpoint: %v", err)
-	}
-	if parent.CurrentNodeIndex != 1 {
-		t.Fatalf("expected persisted next node index 1, got %d", parent.CurrentNodeIndex)
-	}
-	if len(parent.NodeInstances) != 3 {
-		t.Fatalf("expected trigger, apply and system node in one checkpoint, got %d nodes", len(parent.NodeInstances))
 	}
 	close(releaseChild)
 	waitForDone(t, exec.Done())
@@ -669,95 +532,9 @@ func TestServiceWaitForTriggeredFlowsPersistsWaitingCheckpointAndContinues(t *te
 	}
 }
 
-// TestServicePersistSystemFollowUpIsIdempotentPerTriggerPosition verifies
-// repeated persistence for one trigger position reuses its system node.
-func TestServicePersistSystemFollowUpIsIdempotentPerTriggerPosition(t *testing.T) {
-	db := openFlowTestDB(t)
-	if err := AutoMigrate(db); err != nil {
-		t.Fatalf("auto migrate flow tables: %v", err)
-	}
-
-	repo := NewRepository(db)
-	svc := NewService(repo)
-	ctx := context.Background()
-	now := time.Now().UTC()
-	input := &Token{RawData: "parent-input"}
-	if err := repo.CreateToken(ctx, input); err != nil {
-		t.Fatalf("create parent input: %v", err)
-	}
-	parent := &FlowInstance{Name: "parent", Status: FlowStatusRunning, StartedAt: now, UpdatedAt: now}
-	if err := repo.CreateFlowInstance(ctx, parent); err != nil {
-		t.Fatalf("create parent: %v", err)
-	}
-	node := &NodeInstance{Name: "trigger", FlowInstanceID: parent.ID, NodeIndex: 0, Status: NodeStatusRunning, InputTokenID: &input.ID, StartedAt: now, UpdatedAt: now}
-	if err := repo.CreateNodeInstance(ctx, node); err != nil {
-		t.Fatalf("create parent node: %v", err)
-	}
-
-	for attempt := 0; attempt < 2; attempt++ {
-		if err := svc.persistSystemChild(ctx, parent.ID, node.ID, node.NodeIndex, 0, "child", "same-input"); err != nil {
-			t.Fatalf("persist identical follow-up on attempt %d: %v", attempt+1, err)
-		}
-	}
-	children, err := repo.ListSystemNodesByPreviousNode(ctx, parent.ID, node.ID)
-	if err != nil {
-		t.Fatalf("list persisted follow-ups: %v", err)
-	}
-	if len(children) != 1 {
-		t.Fatalf("expected one idempotent system node, got %d", len(children))
-	}
-	if err := svc.persistSystemChild(ctx, parent.ID, node.ID, node.NodeIndex, 0, "other-child", "same-input"); err == nil {
-		t.Fatal("expected conflicting replay at the same trigger position to fail")
-	}
-}
-
-// TestServicePersistSystemChildAllowsFirstChildOfLaterParentNode verifies
-// system-node indexes remain unique across parent nodes.
-func TestServicePersistSystemChildAllowsFirstChildOfLaterParentNode(t *testing.T) {
-	db := openFlowTestDB(t)
-	if err := AutoMigrate(db); err != nil {
-		t.Fatalf("auto migrate flow tables: %v", err)
-	}
-	repo := NewRepository(db)
-	svc := NewService(repo)
-	ctx := context.Background()
-	now := time.Now().UTC()
-	parent := &FlowInstance{Name: "parent", Status: FlowStatusRunning, StartedAt: now, UpdatedAt: now}
-	if err := repo.CreateFlowInstance(ctx, parent); err != nil {
-		t.Fatalf("create parent: %v", err)
-	}
-	first := &NodeInstance{Name: "first", FlowInstanceID: parent.ID, NodeIndex: 0, Status: NodeStatusFinished, StartedAt: now, UpdatedAt: now}
-	second := &NodeInstance{Name: "second", FlowInstanceID: parent.ID, NodeIndex: 1, Status: NodeStatusRunning, StartedAt: now, UpdatedAt: now}
-	if err := repo.CreateNodeInstance(ctx, first); err != nil {
-		t.Fatalf("create first parent node: %v", err)
-	}
-	if err := repo.CreateNodeInstance(ctx, second); err != nil {
-		t.Fatalf("create second parent node: %v", err)
-	}
-	if err := svc.persistSystemChild(ctx, parent.ID, first.ID, first.NodeIndex, 0, "first-child", "first"); err != nil {
-		t.Fatalf("persist first child: %v", err)
-	}
-	if err := svc.persistSystemChild(ctx, parent.ID, second.ID, second.NodeIndex, 0, "second-child", "second"); err != nil {
-		t.Fatalf("persist first child of later parent node: %v", err)
-	}
-	instance, err := repo.FindFlowInstanceByID(ctx, parent.ID)
-	if err != nil {
-		t.Fatalf("load parent: %v", err)
-	}
-	var systemNodes []NodeInstance
-	for _, node := range instance.NodeInstances {
-		if node.SystemNode {
-			systemNodes = append(systemNodes, node)
-		}
-	}
-	if len(systemNodes) != 2 || systemNodes[0].NodeIndex == systemNodes[1].NodeIndex {
-		t.Fatalf("system nodes = %#v, want two distinct child checkpoints", systemNodes)
-	}
-}
-
-// TestServiceDispatchFailureFailsWaitingParent verifies child dispatch errors
+// TestServiceMissingChildStartFailsParent verifies child dispatch errors
 // are propagated to the waiting parent flow.
-func TestServiceDispatchFailureFailsWaitingParent(t *testing.T) {
+func TestServiceMissingChildStartFailsParent(t *testing.T) {
 	db := openFlowTestDB(t)
 	if err := AutoMigrate(db); err != nil {
 		t.Fatalf("auto migrate flow tables: %v", err)
@@ -770,10 +547,8 @@ func TestServiceDispatchFailureFailsWaitingParent(t *testing.T) {
 		Nodes: []FlowNode{{
 			Name: "trigger",
 			Action: func(ctx context.Context, rawInput string, runtime Runtime) (string, error) {
-				if err := runtime.TriggerFlow(ctx, "missing-child", rawInput); err != nil {
-					return "", err
-				}
-				if err := runtime.WaitForTriggeredFlows(ctx); err != nil {
+				_, err := runtime.StartWorkflow(ctx, "missing-child", rawInput)
+				if err != nil {
 					return "", err
 				}
 				return rawInput, nil
@@ -783,7 +558,7 @@ func TestServiceDispatchFailureFailsWaitingParent(t *testing.T) {
 		t.Fatalf("register parent flow: %v", err)
 	}
 
-	exec, err := svc.StartFlow(context.Background(), "parent-with-missing-child", "start")
+	exec, err := svc.startFlowExecution(context.Background(), "parent-with-missing-child", "start")
 	if err != nil {
 		t.Fatalf("start parent: %v", err)
 	}
@@ -955,7 +730,7 @@ func TestTerminalHookCanDecodeStartTokenSetThroughService(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build start token: %v", err)
 	}
-	exec, err := svc.StartFlow(context.Background(), "terminal-hook-token", startToken)
+	exec, err := svc.startFlowExecution(context.Background(), "terminal-hook-token", startToken)
 	if err != nil {
 		t.Fatalf("start flow: %v", err)
 	}
@@ -972,9 +747,9 @@ func TestTerminalHookCanDecodeStartTokenSetThroughService(t *testing.T) {
 	}
 }
 
-// TestServiceRetryRestartsFailedTriggeredFlow verifies retry starts a new child
+// TestServiceRetryRestartsFailedChildWorkflow verifies retry starts a new child
 // run while retaining the failed child as history.
-func TestServiceRetryRestartsFailedTriggeredFlow(t *testing.T) {
+func TestServiceRetryRestartsFailedChildWorkflow(t *testing.T) {
 	db := openFlowTestDB(t)
 	if err := AutoMigrate(db); err != nil {
 		t.Fatalf("auto migrate flow: %v", err)
@@ -988,7 +763,7 @@ func TestServiceRetryRestartsFailedTriggeredFlow(t *testing.T) {
 			if childAttempts.Add(1) == 1 {
 				return "", errors.New("first child attempt failed")
 			}
-			return "child-ok", nil
+			return tokens.NewTokenBuilder().SetResult("child-ok").Build()
 		}}},
 	}); err != nil {
 		t.Fatalf("register child flow: %v", err)
@@ -997,13 +772,12 @@ func TestServiceRetryRestartsFailedTriggeredFlow(t *testing.T) {
 		Name: "retry-parent",
 		Nodes: []FlowNode{
 			{Name: "trigger", Action: func(ctx context.Context, rawInput string, runtime Runtime) (string, error) {
-				if err := runtime.TriggerFlow(ctx, "retry-child", rawInput); err != nil {
+				ref, err := runtime.StartWorkflow(ctx, "retry-child", rawInput)
+				if err != nil {
 					return "", err
 				}
-				if err := runtime.WaitForTriggeredFlows(ctx); err != nil {
-					return "", err
-				}
-				return rawInput, nil
+				result, err := runtime.AwaitWorkflow(ctx, ref)
+				return string(result), err
 			}},
 			{Name: "finalize", Action: func(context.Context, string, Runtime) (string, error) {
 				return "parent-ok", nil
@@ -1016,7 +790,7 @@ func TestServiceRetryRestartsFailedTriggeredFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build start token: %v", err)
 	}
-	parentExec, err := svc.StartFlow(context.Background(), "retry-parent", startToken, StartOptions{Metadata: EnsureCorrelationMetadata(nil, "Retry-Test", "Retry-Test")})
+	parentExec, err := svc.startFlowExecution(context.Background(), "retry-parent", startToken, StartOptions{Metadata: EnsureCorrelationMetadata(nil, "Retry-Test", "Retry-Test")})
 	if err != nil {
 		t.Fatalf("start parent flow: %v", err)
 	}
@@ -1025,23 +799,12 @@ func TestServiceRetryRestartsFailedTriggeredFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load failed parent: %v", err)
 	}
-	if failedParent.Status != FlowStatusFailed || failedParent.CurrentNodeIndex != 1 {
-		t.Fatalf("failed parent state = status %s node %d, want failed node 1", failedParent.Status, failedParent.CurrentNodeIndex)
+	if failedParent.Status != FlowStatusFailed || failedParent.CurrentNodeIndex != 0 {
+		t.Fatalf("failed parent state = status %s node %d, want failed node 0", failedParent.Status, failedParent.CurrentNodeIndex)
 	}
 	var retryNode NodeInstance
 	if err := db.Where("flow_instance_id = ? AND node_index = ?", failedParent.ID, failedParent.CurrentNodeIndex).First(&retryNode).Error; err != nil {
 		t.Fatalf("load retry node: %v", err)
-	}
-	var oldSystemNode NodeInstance
-	if err := db.Where("flow_instance_id = ? AND system_node = ?", failedParent.ID, true).First(&oldSystemNode).Error; err != nil {
-		t.Fatalf("load failed system node: %v", err)
-	}
-	if oldSystemNode.SystemFlowInstanceID == nil {
-		t.Fatal("failed system node has no child flow reference")
-	}
-	oldChild, err := repo.FindFlowInstanceByID(context.Background(), *oldSystemNode.SystemFlowInstanceID)
-	if err != nil {
-		t.Fatalf("load failed child: %v", err)
 	}
 	oldCorrelation := parseFlowMetadata(failedParent.MetadataJSON).CorrelationID
 	if err := svc.UpdateCurrentNodeStartToken(context.Background(), failedParent.ID, retryNode.ID, startToken); err != nil {
@@ -1064,11 +827,14 @@ func TestServiceRetryRestartsFailedTriggeredFlow(t *testing.T) {
 	if len(children) != 2 || children[0].ID == children[1].ID {
 		t.Fatalf("child attempts = %#v, want two distinct instances", children)
 	}
-	if children[0].ID != oldChild.ID || children[0].Status != FlowStatusFailed || children[0].ParentSystemNodeID != nil {
-		t.Fatalf("old child after retry = %#v, want detached failed history", children[0])
+	if children[0].Status != FlowStatusFailed || children[1].Status != FlowStatusFinished {
+		t.Fatalf("child attempt statuses = %s/%s, want failed/finished", children[0].Status, children[1].Status)
 	}
-	if children[1].Status != FlowStatusFinished || children[1].ParentSystemNodeID == nil {
-		t.Fatalf("new child after retry = %#v, want finished linked child", children[1])
+	if oldChildMetadata := parseFlowMetadata(children[0].MetadataJSON); oldChildMetadata.ParentFlowInstanceID != failedParent.ID || oldChildMetadata.CorrelationID != oldCorrelation {
+		t.Fatalf("first child parent/correlation metadata = %#v", oldChildMetadata)
+	}
+	if newChildMetadata := parseFlowMetadata(children[1].MetadataJSON); newChildMetadata.ParentFlowInstanceID != failedParent.ID || newChildMetadata.CorrelationID != parseFlowMetadata(retriedParent.MetadataJSON).CorrelationID {
+		t.Fatalf("retried child parent/correlation metadata = %#v", newChildMetadata)
 	}
 }
 
@@ -1206,32 +972,8 @@ func waitForFlowInstanceByNameAndStatus(t *testing.T, repo *Repository, name str
 	return FlowInstance{}
 }
 
-// waitForSystemNodeByFlowInstanceAndName polls until a matching system node
-// reaches its expected status.
-func waitForSystemNodeByFlowInstanceAndName(t *testing.T, repo *Repository, flowInstanceID uint, name string, status NodeStatus) NodeInstance {
-	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		var nodes []NodeInstance
-		if err := repo.db.WithContext(context.Background()).
-			Preload("InputToken").
-			Preload("OutputToken").
-			Where("flow_instance_id = ? AND system_node = ? AND name = ? AND status = ?", flowInstanceID, true, name, status).
-			Order("id asc").
-			Find(&nodes).Error; err != nil {
-			t.Fatalf("query system nodes: %v", err)
-		}
-		if len(nodes) > 0 {
-			return nodes[0]
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for system node %q with status %s", name, status)
-	return NodeInstance{}
-}
-
-// TestServiceActionCanStartAnotherFlow verifies actions can schedule child
-// flows through their runtime.
+// TestServiceActionCanStartAnotherFlow verifies a node can start and await a
+// child flow through its runtime.
 func TestServiceActionCanStartAnotherFlow(t *testing.T) {
 	db := openFlowTestDB(t)
 	if err := AutoMigrate(db); err != nil {
@@ -1247,7 +989,7 @@ func TestServiceActionCanStartAnotherFlow(t *testing.T) {
 			{
 				Name: "child-node",
 				Action: func(ctx context.Context, rawInput string, runtime Runtime) (string, error) {
-					return rawInput + "-child", nil
+					return tokens.NewTokenBuilder().SetResult(rawInput + "-child").Build()
 				},
 			},
 		},
@@ -1261,10 +1003,19 @@ func TestServiceActionCanStartAnotherFlow(t *testing.T) {
 			{
 				Name: "start-child",
 				Action: func(ctx context.Context, rawInput string, runtime Runtime) (string, error) {
-					if err := runtime.TriggerFlow(ctx, "child", rawInput); err != nil {
+					ref, err := runtime.StartWorkflow(ctx, "child", rawInput)
+					if err != nil {
 						return "", err
 					}
-					return fmt.Sprintf("%s|child-triggered", rawInput), nil
+					result, err := runtime.AwaitWorkflow(ctx, ref)
+					if err != nil {
+						return "", err
+					}
+					var childResult string
+					if err := json.Unmarshal(result, &childResult); err != nil {
+						return "", err
+					}
+					return fmt.Sprintf("%s|%s", rawInput, childResult), nil
 				},
 			},
 		},
@@ -1272,7 +1023,7 @@ func TestServiceActionCanStartAnotherFlow(t *testing.T) {
 		t.Fatalf("register parent flow: %v", err)
 	}
 
-	exec, err := svc.StartFlow(context.Background(), "parent", "start-token")
+	exec, err := svc.startFlowExecution(context.Background(), "parent", "start-token")
 	if err != nil {
 		t.Fatalf("start parent flow: %v", err)
 	}
@@ -1287,21 +1038,21 @@ func TestServiceActionCanStartAnotherFlow(t *testing.T) {
 	if persistedParent.OutputToken == nil {
 		t.Fatal("parent output token missing")
 	}
-	if persistedParent.OutputToken.RawData != "start-token|child-triggered" {
+	if persistedParent.OutputToken.RawData != "start-token|start-token-child" {
 		t.Fatalf("unexpected parent output token: %q", persistedParent.OutputToken.RawData)
 	}
 
 	child := waitForFlowInstanceByNameAndStatus(t, repo, "child", FlowStatusFinished)
-	if child.OutputToken == nil || child.OutputToken.RawData != "start-token-child" {
+	if child.OutputToken == nil {
 		t.Fatalf("unexpected child output token: %#v", child.OutputToken)
 	}
-
-	systemNode := waitForSystemNodeByFlowInstanceAndName(t, repo, exec.FlowInstanceID, "__system:follow-up:child", NodeStatusFinished)
-	if systemNode.SystemFlowInstanceID == nil || *systemNode.SystemFlowInstanceID != child.ID {
-		t.Fatalf("unexpected child link on system node: %#v", systemNode.SystemFlowInstanceID)
+	parentMetadata := parseFlowMetadata(persistedParent.MetadataJSON)
+	childMetadata := parseFlowMetadata(child.MetadataJSON)
+	if childMetadata.ParentFlowInstanceID != persistedParent.ID || childMetadata.ParentNodeID == 0 {
+		t.Fatalf("child parent metadata = %#v", childMetadata)
 	}
-	if systemNode.OutputToken == nil || systemNode.OutputToken.RawData != "start-token-child" {
-		t.Fatalf("unexpected system node output token: %#v", systemNode.OutputToken)
+	if childMetadata.CorrelationID == "" || childMetadata.CorrelationID != parentMetadata.CorrelationID {
+		t.Fatalf("parent/child correlation = %q/%q", parentMetadata.CorrelationID, childMetadata.CorrelationID)
 	}
 }
 
@@ -1329,7 +1080,7 @@ func TestServiceDiscardFlowInstanceMarksCheckpointAsHidden(t *testing.T) {
 		t.Fatalf("register flow: %v", err)
 	}
 
-	exec, err := svc.StartFlow(context.Background(), "single-node", "start-token")
+	exec, err := svc.startFlowExecution(context.Background(), "single-node", "start-token")
 	if err != nil {
 		t.Fatalf("start flow: %v", err)
 	}
