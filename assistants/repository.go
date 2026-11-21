@@ -2,6 +2,8 @@ package assistants
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -31,7 +33,66 @@ func AutoMigrate(db *gorm.DB) error {
 	if err := db.AutoMigrate(&ChainRecord{}, &ActionClaim{}); err != nil {
 		return err
 	}
-	return ensureMariaDBLongTextColumn(db, &ChainRecord{}, "state_json")
+	if err := ensureMariaDBLongTextColumn(db, &ChainRecord{}, "state_json"); err != nil {
+		return err
+	}
+	return migrateLegacyRuns(db)
+}
+
+func migrateLegacyRuns(db *gorm.DB) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		var records []ChainRecord
+		if err := tx.Where("draft_id IS NULL OR draft_id = '' OR status IS NULL OR status = ''").Find(&records).Error; err != nil {
+			return err
+		}
+		for _, record := range records {
+			updates := map[string]any{}
+			if strings.TrimSpace(record.DraftID) == "" {
+				draftID, err := newDraftID()
+				if err != nil {
+					return err
+				}
+				updates["draft_id"] = draftID
+			}
+			if strings.TrimSpace(record.Status) == "" {
+				status, err := legacyRunStatus(record.StateJSON)
+				if err != nil {
+					return err
+				}
+				updates["status"] = string(status)
+			}
+			if len(updates) > 0 {
+				if err := tx.Model(&ChainRecord{}).Where("id = ?", record.ID).Updates(updates).Error; err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+}
+
+func newDraftID() (string, error) {
+	var id [24]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(id[:]), nil
+}
+
+func legacyRunStatus(stateJSON string) (RunStatus, error) {
+	var state struct {
+		CompletedAt *time.Time `json:"completedAt"`
+	}
+	if strings.TrimSpace(stateJSON) == "" {
+		stateJSON = "{}"
+	}
+	if err := json.Unmarshal([]byte(stateJSON), &state); err != nil {
+		return "", err
+	}
+	if state.CompletedAt != nil {
+		return RunStatusCompleted, nil
+	}
+	return RunStatusActive, nil
 }
 
 func ensureMariaDBLongTextColumn(db *gorm.DB, model any, column string) error {

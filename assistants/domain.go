@@ -23,10 +23,10 @@ type DraftSession struct {
 // `ScopeKey` und `ActorKey` bleiben generisch, damit Fachkontexte außerhalb des Packages definiert werden.
 type ChainRecord struct {
 	ID       uint   `gorm:"primaryKey"`
-	Name     string `gorm:"type:varchar(120);index;uniqueIndex:idx_assistant_chain_scope_actor,priority:1"`
-	ScopeKey string `gorm:"type:varchar(255);index;uniqueIndex:idx_assistant_chain_scope_actor,priority:2"`
-	ActorKey string `gorm:"type:varchar(120);index;uniqueIndex:idx_assistant_chain_scope_actor,priority:3"`
-	DraftID  string `gorm:"type:varchar(64);index;uniqueIndex:idx_assistant_chain_scope_actor,priority:4"`
+	Name     string `gorm:"type:varchar(120);index;uniqueIndex:idx_assistant_chain_scope_actor_draft,priority:1"`
+	ScopeKey string `gorm:"type:varchar(255);index;uniqueIndex:idx_assistant_chain_scope_actor_draft,priority:2"`
+	ActorKey string `gorm:"type:varchar(120);index;uniqueIndex:idx_assistant_chain_scope_actor_draft,priority:3"`
+	DraftID  string `gorm:"type:varchar(64);index;uniqueIndex:idx_assistant_chain_scope_actor_draft,priority:4"`
 	// AccessRef is an application-defined, non-secret selector for this state.
 	AccessRef string `gorm:"type:varchar(255);index:idx_assistant_access_ref"`
 	// AccessToken is opaque to this package; applications define its meaning and validation.
