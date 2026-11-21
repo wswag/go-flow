@@ -34,7 +34,10 @@ type FlowRef uint
 
 // Flow beschreibt den ausführbaren Blueprint eines Workflows.
 type Flow struct {
-	Name        string
+	Name string
+	// Version identifies the executable definition. Changing it prevents
+	// persisted instances created with another version from being resumed.
+	Version     int
 	Label       string
 	Description string
 	// StartMiddlewares are included when this workflow is started. Sequence
@@ -213,8 +216,10 @@ func (c *FlowExecutionContext) Done() <-chan struct{} {
 
 // FlowInstance speichert einen gesamten Workflow-Lauf mit Checkpoints.
 type FlowInstance struct {
-	ID               uint       `gorm:"primaryKey"`
-	Name             string     `gorm:"index"`
+	ID   uint   `gorm:"primaryKey"`
+	Name string `gorm:"index"`
+	// FlowVersion is nil for instances created before version tracking existed.
+	FlowVersion      *int       `gorm:"index"`
 	Status           FlowStatus `gorm:"index"`
 	IdempotencyKey   string     `gorm:"index"`
 	CurrentNodeIndex int        `gorm:"index"`

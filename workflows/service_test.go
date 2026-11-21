@@ -26,7 +26,8 @@ func TestServiceResumeStoppedFlowsContinuesPersistedCheckpoint(t *testing.T) {
 	repo := NewRepository(db)
 	svc := NewService(repo)
 	flowDef := Flow{
-		Name: "rezeptplanung",
+		Name:    "rezeptplanung",
+		Version: 1,
 		Nodes: []FlowNode{
 			{
 				Name: "analyse",
@@ -79,6 +80,60 @@ func TestServiceResumeStoppedFlowsContinuesPersistedCheckpoint(t *testing.T) {
 	}
 	if persisted.NodeInstances[1].Status != NodeStatusFinished {
 		t.Fatalf("expected second node to finish, got %s", persisted.NodeInstances[1].Status)
+	}
+}
+
+func TestServiceRejectsResumeWhenFlowVersionChanged(t *testing.T) {
+	db := openFlowTestDB(t)
+	if err := AutoMigrate(db); err != nil {
+		t.Fatalf("auto migrate flow tables: %v", err)
+	}
+	repo := NewRepository(db)
+	svc := NewService(repo)
+	flowDef := Flow{Name: "versioned", Version: 2, Nodes: []FlowNode{{Name: "run", Action: func(context.Context, string, Runtime) (string, error) {
+		return "done", nil
+	}}}}
+	if err := svc.RegisterFlow(flowDef); err != nil {
+		t.Fatalf("register flow: %v", err)
+	}
+	id := seedStoppedFlowInstance(t, repo, flowDef.Name)
+	instance, err := repo.FindFlowInstanceByID(context.Background(), id)
+	if err != nil {
+		t.Fatalf("load flow instance: %v", err)
+	}
+	instance.FlowVersion = intPointer(1)
+	if err := repo.UpdateFlowInstance(context.Background(), &instance); err != nil {
+		t.Fatalf("set persisted version: %v", err)
+	}
+	if _, err := svc.ResumeFlowInstance(context.Background(), FlowRef(id)); err == nil {
+		t.Fatal("expected resume to reject a flow instance with a different version")
+	}
+}
+
+func TestServiceRejectsLegacyVersionZeroResume(t *testing.T) {
+	db := openFlowTestDB(t)
+	if err := AutoMigrate(db); err != nil {
+		t.Fatalf("auto migrate flow tables: %v", err)
+	}
+	repo := NewRepository(db)
+	svc := NewService(repo)
+	flowDef := Flow{Name: "legacy-version", Nodes: []FlowNode{{Name: "run", Action: func(context.Context, string, Runtime) (string, error) {
+		return "done", nil
+	}}}}
+	if err := svc.RegisterFlow(flowDef); err != nil {
+		t.Fatalf("register flow: %v", err)
+	}
+	id := seedStoppedFlowInstance(t, repo, flowDef.Name)
+	instance, err := repo.FindFlowInstanceByID(context.Background(), id)
+	if err != nil {
+		t.Fatalf("load flow instance: %v", err)
+	}
+	instance.FlowVersion = nil
+	if err := repo.UpdateFlowInstance(context.Background(), &instance); err != nil {
+		t.Fatalf("clear persisted version: %v", err)
+	}
+	if _, err := svc.ResumeFlowInstance(context.Background(), FlowRef(id)); err == nil {
+		t.Fatal("expected legacy version zero instance to be rejected")
 	}
 }
 
@@ -963,6 +1018,7 @@ func seedStoppedFlowInstance(t *testing.T, repo *Repository, flowName string) ui
 		}
 		instance := &FlowInstance{
 			Name:             flowName,
+			FlowVersion:      intPointer(1),
 			Status:           FlowStatusStopped,
 			CurrentNodeIndex: 1,
 			InputTokenID:     &startToken.ID,
