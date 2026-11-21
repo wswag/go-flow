@@ -223,9 +223,15 @@ type ChainEvent struct {
 
 // PrepareContext stellt früheren Schritten und dem aktuellen Fachschlüssel gemergte Daten bereit.
 type PrepareContext struct {
-	ChainName         string
-	Key               StateKey
-	Current           string
+	ChainName string
+	Key       StateKey
+	Current   string
+	// WorkflowID is the resolved parent workflow reference for the step being
+	// prepared. It is zero when the step has no WorkflowReference callback or
+	// the callback resolves no workflow. The Prepare callback resolves it from
+	// defaults and persisted input; a Commit callback resolves it from the full
+	// prepared step snapshot.
+	WorkflowID        uint
 	Steps             []StepSnapshot
 	CurrentInputPatch json.RawMessage
 	// CurrentResult is the persisted result of the currently prepared step.
@@ -1157,10 +1163,15 @@ func (s *Service) commitStep(ctx context.Context, chainName string, key StateKey
 		ChainName:                          chain.name,
 		Key:                                key,
 		Current:                            chainSnapshot.CurrentStep,
+		WorkflowID:                         0,
 		Steps:                              chainSnapshot.Steps,
 		CurrentInputPatch:                  normalizeJSON(state.Steps[currentStep.Name].InputPatch),
 		CurrentResult:                      normalizeJSON(state.Steps[currentStep.Name].Result),
 		assistantUserInterfaceDependencies: s.assistantInterfaceDependencies(ctx, chain),
+	}
+	prepare.WorkflowID, err = s.resolveWorkflowID(ctx, chain, key, chainSnapshot, currentStep)
+	if err != nil {
+		return StepSnapshot{}, ChainSnapshot{}, err
 	}
 	commitCtx := CommitContext{
 		PrepareContext: prepare,
@@ -1278,12 +1289,17 @@ func (s *Service) JumpToStep(ctx context.Context, chainName string, key StateKey
 	if targetStep.Name != snapshot.CurrentStep && !targetStep.Completed && !hasStepProgress(targetStep) && !chain.stepByName[target].AllowJumpToUnreached {
 		canJump := false
 		if predicate := chain.stepByName[target].CanJumpToUnreached; predicate != nil {
+			workflowID, referenceErr := s.resolveWorkflowID(ctx, chain, key, snapshot, targetStep)
+			if referenceErr != nil {
+				return StepSnapshot{}, ChainSnapshot{}, referenceErr
+			}
 			canJump, err = predicate(ctx, PrepareContext{
 				ChainName:                          chain.name,
 				Key:                                key,
 				Current:                            snapshot.CurrentStep,
 				Steps:                              snapshot.Steps,
 				CurrentInputPatch:                  state.Steps[target].InputPatch,
+				WorkflowID:                         workflowID,
 				assistantUserInterfaceDependencies: s.assistantInterfaceDependencies(ctx, chain),
 			})
 			if err != nil {
@@ -1404,8 +1420,17 @@ func (s *Service) resolveCurrentChain(ctx context.Context, chainName string, key
 			ChainName:                          chain.name,
 			Key:                                key,
 			Current:                            snapshot.CurrentStep,
+			WorkflowID:                         0,
 			Steps:                              snapshot.Steps,
 			assistantUserInterfaceDependencies: s.assistantInterfaceDependencies(ctx, chain),
+		}
+		stepSnapshot, found := findStepSnapshot(snapshot.Steps, snapshot.CurrentStep)
+		if !found {
+			return ChainSnapshot{}, fmt.Errorf("assistant step %q not found", snapshot.CurrentStep)
+		}
+		prepare.WorkflowID, err = s.resolveWorkflowID(ctx, chain, key, snapshot, stepSnapshot)
+		if err != nil {
+			return ChainSnapshot{}, err
 		}
 		shouldCommit, predicateErr := currentStep.AutoCommit.Predicate(ctx, prepare)
 		if predicateErr != nil {
@@ -1421,7 +1446,7 @@ func (s *Service) resolveCurrentChain(ctx context.Context, chainName string, key
 		} else {
 			commitFn = currentStep.Commit
 		}
-		stepSnapshot, found := prepare.Step(currentStep.Name)
+		stepSnapshot, found = prepare.Step(currentStep.Name)
 		if !found {
 			return ChainSnapshot{}, fmt.Errorf("assistant step %q could not be prepared", currentStep.Name)
 		}
@@ -1508,6 +1533,27 @@ func (s *Service) buildChainSnapshotPreparedThroughUnchecked(ctx context.Context
 		input := step.Input
 		preparedInput := json.RawMessage(`{}`)
 		if step.Prepare != nil && step.Sequence <= prepareThroughSequence {
+			referenceStep := StepSnapshot{
+				Name:          step.Name,
+				Sequence:      step.Sequence,
+				Input:         normalizeJSON(mergeJSON(input, persisted.InputPatch)),
+				PreparedInput: json.RawMessage(`{}`),
+				InputPatch:    normalizeJSON(persisted.InputPatch),
+				Result:        normalizeJSON(persisted.Result),
+				Completed:     persisted.CompletedAt != nil,
+			}
+			referenceChain := ChainSnapshot{
+				Name:        chain.name,
+				ScopeKey:    strings.TrimSpace(key.ScopeKey),
+				ActorKey:    strings.TrimSpace(key.ActorKey),
+				CurrentStep: currentStep,
+				Steps:       append(append([]StepSnapshot(nil), snapshots...), referenceStep),
+			}
+			workflowID, err := s.resolveWorkflowID(ctx, chain, key, referenceChain, referenceStep)
+			if err != nil {
+				return ChainSnapshot{}, err
+			}
+			prepareCtx.WorkflowID = workflowID
 			prepared, err := step.Prepare(ctx, prepareCtx)
 			if err != nil {
 				return ChainSnapshot{}, err
@@ -1543,6 +1589,20 @@ func (s *Service) buildChainSnapshotPreparedThroughUnchecked(ctx context.Context
 		CompletedAt: state.CompletedAt,
 		Steps:       snapshots,
 	}, nil
+}
+
+func (s *Service) resolveWorkflowID(ctx context.Context, chain compiledChain, key StateKey, snapshot ChainSnapshot, step StepSnapshot) (uint, error) {
+	definition, ok := chain.stepByName[step.Name]
+	if !ok || definition.WorkflowReference == nil {
+		return 0, nil
+	}
+	ctx = s.withAssistantUserInterfaces(ctx, chain)
+	return definition.WorkflowReference(ctx, ClientResultContext{
+		Key:                                key,
+		Chain:                              snapshot,
+		Step:                               step,
+		assistantUserInterfaceDependencies: s.assistantInterfaceDependencies(ctx, chain),
+	})
 }
 
 func (s *Service) loadState(ctx context.Context, chainName string, key StateKey) (persistedChainState, error) {
@@ -1732,11 +1792,16 @@ func (s *Service) canUpdateCommittedStep(ctx context.Context, chain compiledChai
 		return false, nil
 	}
 	ctx = s.withAssistantUserInterfaces(ctx, chain)
+	workflowID, err := s.resolveWorkflowID(ctx, chain, key, snapshot, step)
+	if err != nil {
+		return false, err
+	}
 	return stepDef.UpdatePolicy.CanUpdate(ctx, UpdatePolicyContext{
 		PrepareContext: PrepareContext{
 			ChainName:                          chain.name,
 			Key:                                key,
 			Current:                            snapshot.CurrentStep,
+			WorkflowID:                         workflowID,
 			Steps:                              snapshot.Steps,
 			assistantUserInterfaceDependencies: s.assistantInterfaceDependencies(ctx, chain),
 		},
@@ -1763,11 +1828,16 @@ func (s *Service) invalidateFollowingSteps(ctx context.Context, chain compiledCh
 		}
 		shouldInvalidate := true
 		if stepDef.UpdatePolicy.InvalidateFollowing != nil {
+			workflowID, referenceErr := s.resolveWorkflowID(ctx, chain, key, snapshot, sourceStep)
+			if referenceErr != nil {
+				continue
+			}
 			allowed, policyErr := stepDef.UpdatePolicy.InvalidateFollowing(ctx, UpdatePolicyContext{
 				PrepareContext: PrepareContext{
 					ChainName:                          chain.name,
 					Key:                                key,
 					Current:                            snapshot.CurrentStep,
+					WorkflowID:                         workflowID,
 					Steps:                              snapshot.Steps,
 					assistantUserInterfaceDependencies: s.assistantInterfaceDependencies(ctx, chain),
 				},
