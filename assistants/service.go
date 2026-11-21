@@ -171,10 +171,10 @@ type StepDefinition struct {
 }
 
 // ChainDefinition registriert eine benannte Schrittkette mit sortierten Schritten.
-// Version defaults to DefaultChainVersion and controls which open runs may be reused.
+// Version controls which open runs may be reused. Version 0 is unversioned and cannot be reused.
 type ChainDefinition struct {
 	Name               string
-	Version            string
+	Version            int
 	Steps              []StepDefinition
 	Precondition       ChainPreconditionFunc
 	CompletionBehavior ChainCompletionBehavior
@@ -287,7 +287,7 @@ type Service struct {
 
 type compiledChain struct {
 	name               string
-	version            string
+	version            int
 	steps              []compiledStep
 	stepByName         map[string]compiledStep
 	precondition       ChainPreconditionFunc
@@ -498,10 +498,7 @@ func (s *Service) RegisterChain(def ChainDefinition) error {
 	if completionBehavior != ChainCompletionReset && completionBehavior != ChainCompletionKeepComplete {
 		return fmt.Errorf("assistant chain %q has unsupported completion behavior %q", name, completionBehavior)
 	}
-	version := strings.TrimSpace(def.Version)
-	if version == "" {
-		version = DefaultChainVersion
-	}
+	version := def.Version
 	steps := make([]compiledStep, 0, len(def.Steps))
 	seen := map[string]struct{}{}
 	for _, step := range def.Steps {
