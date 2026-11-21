@@ -171,8 +171,10 @@ type StepDefinition struct {
 }
 
 // ChainDefinition registriert eine benannte Schrittkette mit sortierten Schritten.
+// Version defaults to DefaultChainVersion and controls which open runs may be reused.
 type ChainDefinition struct {
 	Name               string
+	Version            string
 	Steps              []StepDefinition
 	Precondition       ChainPreconditionFunc
 	CompletionBehavior ChainCompletionBehavior
@@ -285,6 +287,7 @@ type Service struct {
 
 type compiledChain struct {
 	name               string
+	version            string
 	steps              []compiledStep
 	stepByName         map[string]compiledStep
 	precondition       ChainPreconditionFunc
@@ -363,9 +366,9 @@ func (s *Service) NewRun(ctx context.Context, chainName string, key StateKey, op
 		opt = options[0]
 	}
 	if opt.ReuseOpen {
-		record, err := s.repo.FindOpenRun(ctx, key)
+		record, err := s.repo.FindOpenRun(ctx, chain.name, chain.version, key)
 		if err == nil {
-			if record.Name == chain.name && (record.AccessExpiresAt == nil || record.AccessExpiresAt.After(time.Now().UTC())) {
+			if record.AccessExpiresAt == nil || record.AccessExpiresAt.After(time.Now().UTC()) {
 				return StateKey{ScopeKey: record.ScopeKey, ActorKey: record.ActorKey, DraftID: record.DraftID}, nil
 			}
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -382,7 +385,7 @@ func (s *Service) NewRun(ctx context.Context, chainName string, key StateKey, op
 		expiry := time.Now().UTC().Add(opt.ExpiresIn)
 		expiresAt = &expiry
 	}
-	err = s.repo.CreateRun(ctx, &ChainRecord{Name: chain.name, ScopeKey: key.ScopeKey, ActorKey: key.ActorKey, DraftID: key.DraftID, AccessRef: strings.TrimSpace(opt.AccessRef), AccessToken: opt.AccessToken, AccessExpiresAt: expiresAt, AutoExtendTTL: opt.ExtendTTLOnAction, RunTTLSeconds: int64(opt.ExpiresIn / time.Second), Status: string(RunStatusActive), StateJSON: string(data)})
+	err = s.repo.CreateRun(ctx, &ChainRecord{Name: chain.name, Version: chain.version, ScopeKey: key.ScopeKey, ActorKey: key.ActorKey, DraftID: key.DraftID, AccessRef: strings.TrimSpace(opt.AccessRef), AccessToken: opt.AccessToken, AccessExpiresAt: expiresAt, AutoExtendTTL: opt.ExtendTTLOnAction, RunTTLSeconds: int64(opt.ExpiresIn / time.Second), Status: string(RunStatusActive), StateJSON: string(data)})
 	if err != nil {
 		return StateKey{}, err
 	}
@@ -495,6 +498,10 @@ func (s *Service) RegisterChain(def ChainDefinition) error {
 	if completionBehavior != ChainCompletionReset && completionBehavior != ChainCompletionKeepComplete {
 		return fmt.Errorf("assistant chain %q has unsupported completion behavior %q", name, completionBehavior)
 	}
+	version := strings.TrimSpace(def.Version)
+	if version == "" {
+		version = DefaultChainVersion
+	}
 	steps := make([]compiledStep, 0, len(def.Steps))
 	seen := map[string]struct{}{}
 	for _, step := range def.Steps {
@@ -542,6 +549,7 @@ func (s *Service) RegisterChain(def ChainDefinition) error {
 	}
 	s.chains[name] = compiledChain{
 		name:               name,
+		version:            version,
 		steps:              steps,
 		stepByName:         stepByName,
 		precondition:       def.Precondition,
@@ -1114,10 +1122,12 @@ func (s *Service) commitStep(ctx context.Context, chainName string, key StateKey
 		}
 	}
 	prepare := PrepareContext{
-		ChainName: chain.name,
-		Key:       key,
-		Current:   chainSnapshot.CurrentStep,
-		Steps:     chainSnapshot.Steps,
+		ChainName:         chain.name,
+		Key:               key,
+		Current:           chainSnapshot.CurrentStep,
+		Steps:             chainSnapshot.Steps,
+		CurrentInputPatch: normalizeJSON(state.Steps[currentStep.Name].InputPatch),
+		CurrentResult:     normalizeJSON(state.Steps[currentStep.Name].Result),
 	}
 	commitCtx := CommitContext{
 		PrepareContext: prepare,
@@ -1524,6 +1534,10 @@ func (s *Service) saveState(ctx context.Context, chainName string, key StateKey,
 	if s.repo == nil {
 		return nil
 	}
+	chain, err := s.compiledChain(chainName)
+	if err != nil {
+		return err
+	}
 	if state.Steps == nil {
 		state.Steps = map[string]persistedStepState{}
 	}
@@ -1537,6 +1551,7 @@ func (s *Service) saveState(ctx context.Context, chainName string, key StateKey,
 	}
 	return s.repo.SaveRecord(ctx, &ChainRecord{
 		Name:      strings.TrimSpace(chainName),
+		Version:   chain.version,
 		ScopeKey:  strings.TrimSpace(key.ScopeKey),
 		ActorKey:  strings.TrimSpace(key.ActorKey),
 		DraftID:   strings.TrimSpace(key.DraftID),

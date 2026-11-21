@@ -261,6 +261,11 @@ specific run. It is the same identifier whether the application exposes the
 run publicly or keeps it private. `AccessRef` and `AccessToken` remain
 independent application-owned access metadata.
 
+Set `ChainDefinition.Version` to identify the assistant definition. It defaults
+to `assistants.DefaultChainVersion` (`"1"`). Bump it when existing open runs
+should no longer be reused. `ReuseOpen` only finds runs for the currently
+registered assistant version.
+
 ```go
 runKey, err := service.NewRun(ctx, "onboarding", assistants.StateKey{
 	ScopeKey: "organization:12",
