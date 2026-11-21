@@ -41,6 +41,7 @@ type ClientResultContext struct {
 	Chain    ChainSnapshot
 	Step     StepSnapshot
 	Workflow *workflows.FlowWaitResult
+	assistantUserInterfaceDependencies
 }
 
 // ClientResultFunc defines the allow-list for one assistant step. Returning a
@@ -173,8 +174,10 @@ type StepDefinition struct {
 // ChainDefinition registriert eine benannte Schrittkette mit sortierten Schritten.
 // Version controls which open runs may be reused. Version 0 is unversioned and cannot be reused.
 type ChainDefinition struct {
-	Name               string
-	Version            int
+	Name    string
+	Version int
+	// UserInterfaces are shared by every run of this registered assistant.
+	UserInterfaces     []any
 	Steps              []StepDefinition
 	Precondition       ChainPreconditionFunc
 	CompletionBehavior ChainCompletionBehavior
@@ -229,6 +232,7 @@ type PrepareContext struct {
 	// Steps intentionally contains only earlier prepared steps, so a wait step
 	// can otherwise not resolve a workflow reference it just replaced itself.
 	CurrentResult json.RawMessage
+	assistantUserInterfaceDependencies
 }
 
 // NewTokenBuilder creates a token tagged with this assistant chain and current
@@ -271,9 +275,10 @@ type UpdatePolicyContext struct {
 }
 
 type Service struct {
-	repo   *Repository
-	chains map[string]compiledChain
-	mu     sync.RWMutex
+	repo           *Repository
+	chains         map[string]compiledChain
+	userInterfaces []any
+	mu             sync.RWMutex
 	// resolveMu serialisiert die Zustandsübergänge. CurrentStep darf
 	// auto-commits auslösen; parallele GETs dürfen dabei nicht denselben
 	// Übergang zweimal vorbereiten und committen.
@@ -288,6 +293,7 @@ type Service struct {
 type compiledChain struct {
 	name               string
 	version            int
+	userInterfaces     []any
 	steps              []compiledStep
 	stepByName         map[string]compiledStep
 	precondition       ChainPreconditionFunc
@@ -328,6 +334,30 @@ func NewService(repo *Repository) *Service {
 		chains:      map[string]compiledChain{},
 		subscribers: map[chan ChainEvent]struct{}{},
 	}
+}
+
+// RegisterUserInterface registers an application dependency at service scope.
+// Service dependencies are the fallback after call-specific and assistant-level values.
+func (s *Service) RegisterUserInterface(value any) error {
+	return s.RegisterUserInterfaces(value)
+}
+
+// RegisterUserInterfaces registers application dependencies at service scope.
+// Nil values are rejected; duplicate matching types are reported as ambiguous
+// when resolved from an assistant callback.
+func (s *Service) RegisterUserInterfaces(values ...any) error {
+	if s == nil {
+		return errors.New("assistant service is not configured")
+	}
+	for _, value := range values {
+		if isNilAssistantDependency(value) {
+			return errors.New("assistant user interface cannot be nil")
+		}
+	}
+	s.mu.Lock()
+	s.userInterfaces = append(s.userInterfaces, values...)
+	s.mu.Unlock()
+	return nil
 }
 
 // NewRun creates an independent assistant run beneath a scope and actor.
@@ -547,6 +577,7 @@ func (s *Service) RegisterChain(def ChainDefinition) error {
 	s.chains[name] = compiledChain{
 		name:               name,
 		version:            version,
+		userInterfaces:     append([]any(nil), def.UserInterfaces...),
 		steps:              steps,
 		stepByName:         stepByName,
 		precondition:       def.Precondition,
@@ -587,6 +618,7 @@ func (s *Service) AdvancePendingChains(ctx context.Context, key StateKey, workfl
 		if chainErr != nil {
 			continue
 		}
+		ctx = s.withAssistantUserInterfaces(ctx, chain)
 		runKey := StateKey{ScopeKey: record.ScopeKey, ActorKey: record.ActorKey, DraftID: record.DraftID}
 		if preconditionErr := s.checkPrecondition(ctx, chain, runKey); preconditionErr != nil {
 			continue
@@ -608,7 +640,7 @@ func (s *Service) AdvancePendingChains(ctx context.Context, key StateKey, workfl
 			if snapshotErr != nil {
 				return updated, snapshotErr
 			}
-			clientContext := ClientResultContext{Key: runKey, Chain: snapshot, Step: step}
+			clientContext := ClientResultContext{Key: runKey, Chain: snapshot, Step: step, assistantUserInterfaceDependencies: s.assistantInterfaceDependencies(ctx, chain)}
 			waitingFor, referenceErr := current.WorkflowReference(ctx, clientContext)
 			if referenceErr != nil {
 				return updated, referenceErr
@@ -756,7 +788,8 @@ func (s *Service) WaitClientStep(ctx context.Context, chainName string, key Stat
 		return ClientStepWaitResult{}, fmt.Errorf("assistant step %q has no client result contract", step.Name)
 	}
 
-	clientContext := ClientResultContext{Key: key, Chain: chain, Step: step}
+	ctx = s.withAssistantUserInterfaces(ctx, compiled)
+	clientContext := ClientResultContext{Key: key, Chain: chain, Step: step, assistantUserInterfaceDependencies: s.assistantInterfaceDependencies(ctx, compiled)}
 	pending := false
 	if definition.WorkflowReference != nil {
 		if waiter == nil {
@@ -869,6 +902,7 @@ func (s *Service) clientChainSnapshot(ctx context.Context, key StateKey, chain C
 	if err != nil {
 		return ClientChainSnapshot{}, err
 	}
+	ctx = s.withAssistantUserInterfaces(ctx, compiled)
 	client := ClientChainSnapshot{
 		Name:        chain.Name,
 		CurrentStep: chain.CurrentStep,
@@ -880,7 +914,7 @@ func (s *Service) clientChainSnapshot(ctx context.Context, key StateKey, chain C
 		if !found || definition.ClientResult == nil {
 			return ClientChainSnapshot{}, fmt.Errorf("assistant step %q has no client result contract", step.Name)
 		}
-		projected, projectionErr := definition.ClientResult(ctx, ClientResultContext{Key: key, Chain: chain, Step: step})
+		projected, projectionErr := definition.ClientResult(ctx, ClientResultContext{Key: key, Chain: chain, Step: step, assistantUserInterfaceDependencies: s.assistantInterfaceDependencies(ctx, compiled)})
 		if projectionErr != nil {
 			return ClientChainSnapshot{}, projectionErr
 		}
@@ -1054,6 +1088,7 @@ func (s *Service) commitStep(ctx context.Context, chainName string, key StateKey
 	if err != nil {
 		return StepSnapshot{}, ChainSnapshot{}, err
 	}
+	ctx = s.withAssistantUserInterfaces(ctx, chain)
 	if err := s.checkPrecondition(ctx, chain, key); err != nil {
 		return StepSnapshot{}, ChainSnapshot{}, err
 	}
@@ -1119,12 +1154,13 @@ func (s *Service) commitStep(ctx context.Context, chainName string, key StateKey
 		}
 	}
 	prepare := PrepareContext{
-		ChainName:         chain.name,
-		Key:               key,
-		Current:           chainSnapshot.CurrentStep,
-		Steps:             chainSnapshot.Steps,
-		CurrentInputPatch: normalizeJSON(state.Steps[currentStep.Name].InputPatch),
-		CurrentResult:     normalizeJSON(state.Steps[currentStep.Name].Result),
+		ChainName:                          chain.name,
+		Key:                                key,
+		Current:                            chainSnapshot.CurrentStep,
+		Steps:                              chainSnapshot.Steps,
+		CurrentInputPatch:                  normalizeJSON(state.Steps[currentStep.Name].InputPatch),
+		CurrentResult:                      normalizeJSON(state.Steps[currentStep.Name].Result),
+		assistantUserInterfaceDependencies: s.assistantInterfaceDependencies(ctx, chain),
 	}
 	commitCtx := CommitContext{
 		PrepareContext: prepare,
@@ -1219,6 +1255,7 @@ func (s *Service) JumpToStep(ctx context.Context, chainName string, key StateKey
 	if err != nil {
 		return StepSnapshot{}, ChainSnapshot{}, err
 	}
+	ctx = s.withAssistantUserInterfaces(ctx, chain)
 	if err := s.checkPrecondition(ctx, chain, key); err != nil {
 		return StepSnapshot{}, ChainSnapshot{}, err
 	}
@@ -1242,11 +1279,12 @@ func (s *Service) JumpToStep(ctx context.Context, chainName string, key StateKey
 		canJump := false
 		if predicate := chain.stepByName[target].CanJumpToUnreached; predicate != nil {
 			canJump, err = predicate(ctx, PrepareContext{
-				ChainName:         chain.name,
-				Key:               key,
-				Current:           snapshot.CurrentStep,
-				Steps:             snapshot.Steps,
-				CurrentInputPatch: state.Steps[target].InputPatch,
+				ChainName:                          chain.name,
+				Key:                                key,
+				Current:                            snapshot.CurrentStep,
+				Steps:                              snapshot.Steps,
+				CurrentInputPatch:                  state.Steps[target].InputPatch,
+				assistantUserInterfaceDependencies: s.assistantInterfaceDependencies(ctx, chain),
 			})
 			if err != nil {
 				return StepSnapshot{}, ChainSnapshot{}, err
@@ -1342,6 +1380,7 @@ func (s *Service) resolveCurrentChain(ctx context.Context, chainName string, key
 	if err != nil {
 		return ChainSnapshot{}, err
 	}
+	ctx = s.withAssistantUserInterfaces(ctx, chain)
 	if err := s.checkPrecondition(ctx, chain, key); err != nil {
 		return ChainSnapshot{}, err
 	}
@@ -1362,10 +1401,11 @@ func (s *Service) resolveCurrentChain(ctx context.Context, chainName string, key
 			return snapshot, nil
 		}
 		prepare := PrepareContext{
-			ChainName: chain.name,
-			Key:       key,
-			Current:   snapshot.CurrentStep,
-			Steps:     snapshot.Steps,
+			ChainName:                          chain.name,
+			Key:                                key,
+			Current:                            snapshot.CurrentStep,
+			Steps:                              snapshot.Steps,
+			assistantUserInterfaceDependencies: s.assistantInterfaceDependencies(ctx, chain),
 		}
 		shouldCommit, predicateErr := currentStep.AutoCommit.Predicate(ctx, prepare)
 		if predicateErr != nil {
@@ -1447,6 +1487,7 @@ func (s *Service) buildChainSnapshotPreparedThrough(ctx context.Context, chain c
 }
 
 func (s *Service) buildChainSnapshotPreparedThroughUnchecked(ctx context.Context, chain compiledChain, key StateKey, state persistedChainState, prepareThroughStepName string) (ChainSnapshot, error) {
+	ctx = s.withAssistantUserInterfaces(ctx, chain)
 	currentStep := s.resolveCurrentStepName(chain, state)
 	prepareThroughSequence := chain.stepByName[currentStep].Sequence
 	if requestedStep, ok := chain.stepByName[strings.TrimSpace(prepareThroughStepName)]; ok && requestedStep.Sequence > prepareThroughSequence {
@@ -1456,12 +1497,13 @@ func (s *Service) buildChainSnapshotPreparedThroughUnchecked(ctx context.Context
 	for _, step := range chain.steps {
 		persisted := state.Steps[step.Name]
 		prepareCtx := PrepareContext{
-			ChainName:         chain.name,
-			Key:               key,
-			Current:           currentStep,
-			Steps:             append([]StepSnapshot(nil), snapshots...),
-			CurrentInputPatch: normalizeJSON(persisted.InputPatch),
-			CurrentResult:     normalizeJSON(persisted.Result),
+			ChainName:                          chain.name,
+			Key:                                key,
+			Current:                            currentStep,
+			Steps:                              append([]StepSnapshot(nil), snapshots...),
+			CurrentInputPatch:                  normalizeJSON(persisted.InputPatch),
+			CurrentResult:                      normalizeJSON(persisted.Result),
+			assistantUserInterfaceDependencies: s.assistantInterfaceDependencies(ctx, chain),
 		}
 		input := step.Input
 		preparedInput := json.RawMessage(`{}`)
@@ -1589,6 +1631,7 @@ func (s *Service) checkPrecondition(ctx context.Context, chain compiledChain, ke
 	if chain.precondition == nil {
 		return nil
 	}
+	ctx = s.withAssistantUserInterfaces(ctx, chain)
 	return chain.precondition(ctx, key)
 }
 
@@ -1688,18 +1731,21 @@ func (s *Service) canUpdateCommittedStep(ctx context.Context, chain compiledChai
 	if stepDef.UpdatePolicy.CanUpdate == nil {
 		return false, nil
 	}
+	ctx = s.withAssistantUserInterfaces(ctx, chain)
 	return stepDef.UpdatePolicy.CanUpdate(ctx, UpdatePolicyContext{
 		PrepareContext: PrepareContext{
-			ChainName: chain.name,
-			Key:       key,
-			Current:   snapshot.CurrentStep,
-			Steps:     snapshot.Steps,
+			ChainName:                          chain.name,
+			Key:                                key,
+			Current:                            snapshot.CurrentStep,
+			Steps:                              snapshot.Steps,
+			assistantUserInterfaceDependencies: s.assistantInterfaceDependencies(ctx, chain),
 		},
 		Step: step,
 	})
 }
 
 func (s *Service) invalidateFollowingSteps(ctx context.Context, chain compiledChain, key StateKey, state *persistedChainState, stepName string) bool {
+	ctx = s.withAssistantUserInterfaces(ctx, chain)
 	snapshot, err := s.buildChainSnapshot(ctx, chain, key, *state)
 	if err != nil {
 		return false
@@ -1719,10 +1765,11 @@ func (s *Service) invalidateFollowingSteps(ctx context.Context, chain compiledCh
 		if stepDef.UpdatePolicy.InvalidateFollowing != nil {
 			allowed, policyErr := stepDef.UpdatePolicy.InvalidateFollowing(ctx, UpdatePolicyContext{
 				PrepareContext: PrepareContext{
-					ChainName: chain.name,
-					Key:       key,
-					Current:   snapshot.CurrentStep,
-					Steps:     snapshot.Steps,
+					ChainName:                          chain.name,
+					Key:                                key,
+					Current:                            snapshot.CurrentStep,
+					Steps:                              snapshot.Steps,
+					assistantUserInterfaceDependencies: s.assistantInterfaceDependencies(ctx, chain),
 				},
 				Step: sourceStep,
 			}, following)

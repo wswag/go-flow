@@ -223,6 +223,28 @@ The gzip plugin stores compressible assistant state with the `gz:` marker.
 Existing uncompressed `StateJSON` values have no marker and continue to load as
 plain text. Pass a `*gorm.DB` opened with your application's database driver.
 
+### Assistant dependencies
+
+Assistant callbacks resolve dependencies with `assistants.GetInterface[T]`.
+Resolution uses the same cascade as workflows: call-specific values added with
+`assistants.WithUserInterfaces`, then `ChainDefinition.UserInterfaces`, then
+service-level values registered with `RegisterUserInterface(s)`. Dependencies
+are process-local and are not persisted with a run.
+
+```go
+type ProfileStore interface {
+	LoadProfile(context.Context, string) (Profile, error)
+}
+
+func prepareProfile(ctx context.Context, prepare assistants.PrepareContext) (any, error) {
+	store, err := assistants.GetInterface[ProfileStore](prepare)
+	if err != nil {
+		return nil, err
+	}
+	return store.LoadProfile(ctx, prepare.Key.ActorKey)
+}
+```
+
 ### Application-owned access metadata
 
 Each persisted assistant state can also carry an opaque `AccessToken` and an
