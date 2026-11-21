@@ -247,7 +247,16 @@ func (s *Service) RegisterActionMiddleware(middleware ActionMiddleware) {
 
 // StartFlow starts a workflow in the background and returns its serializable
 // instance reference. At most one StartOptions value may be provided.
-func (s *Service) StartFlow(ctx context.Context, name string, startToken string, options ...StartOptions) (FlowRef, error) {
+func (s *Service) StartFlow(ctx context.Context, name string, start any, options ...StartOptions) (FlowRef, error) {
+	startToken, err := tokens.NewTokenBuilder().SetInput(start).Build()
+	if err != nil {
+		return 0, err
+	}
+	return s.StartFlowRaw(ctx, name, startToken, options...)
+}
+
+// StartFlowRaw starts a workflow from a serialized token or legacy plain input.
+func (s *Service) StartFlowRaw(ctx context.Context, name string, startToken string, options ...StartOptions) (FlowRef, error) {
 	exec, err := s.startFlowExecution(ctx, name, startToken, options...)
 	if err != nil {
 		return 0, err
@@ -1975,7 +1984,16 @@ func (r *executionRuntime) CurrentEvent() FlowEvent {
 // StartFlow starts a child workflow and returns its unique serializable
 // instance reference. The child inherits correlation metadata and records this
 // node and workflow as its parent.
-func (r *executionRuntime) StartFlow(ctx context.Context, name string, startToken string) (FlowRef, error) {
+func (r *executionRuntime) StartFlow(ctx context.Context, name string, start any) (FlowRef, error) {
+	startToken, err := tokens.NewTokenBuilder().SetInput(start).Build()
+	if err != nil {
+		return 0, err
+	}
+	return r.StartFlowRaw(ctx, name, startToken)
+}
+
+// StartFlowRaw starts a child flow from a serialized token or legacy plain input.
+func (r *executionRuntime) StartFlowRaw(ctx context.Context, name string, startToken string) (FlowRef, error) {
 	if r == nil || r.service == nil || r.service.store == nil {
 		return 0, errors.New("flow runtime is not configured")
 	}
@@ -1997,7 +2015,7 @@ func (r *executionRuntime) StartFlow(ctx context.Context, name string, startToke
 	if err != nil {
 		return 0, err
 	}
-	return r.service.StartFlow(ctx, name, strings.TrimSpace(startToken), StartOptions{
+	return r.service.StartFlowRaw(ctx, name, strings.TrimSpace(startToken), StartOptions{
 		Metadata:       metadata,
 		Middlewares:    r.service.executionStartMiddlewares(r.flowInstanceID),
 		UserInterfaces: r.service.executionUserInterfaces(r.flowInstanceID),

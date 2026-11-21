@@ -67,7 +67,9 @@ type Runtime interface {
 	NewTokenBuilder(state any) *tokens.TokenBuilder
 	CurrentEvent() FlowEvent
 	// StartFlow starts a child flow and returns its serializable reference.
-	StartFlow(ctx context.Context, name string, startToken string) (FlowRef, error)
+	StartFlow(ctx context.Context, name string, start any) (FlowRef, error)
+	// StartFlowRaw starts a child flow from a serialized or legacy raw token.
+	StartFlowRaw(ctx context.Context, name string, startToken string) (FlowRef, error)
 	// AwaitFlow waits for that reference and returns result JSON or a flow error.
 	AwaitFlow(ctx context.Context, ref FlowRef) (json.RawMessage, error)
 	// GetExecutionContextForFlow resolves a flow reference to its execution context.

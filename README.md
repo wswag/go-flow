@@ -71,13 +71,7 @@ func startGreeting(ctx context.Context, db *gorm.DB, name string) (GreetingResul
 	if err := registerGreetingFlow(engine); err != nil {
 		return GreetingResult{}, err
 	}
-	startToken, err := tokens.NewTokenBuilder().
-		SetInput(GreetingStartToken{Name: name}).
-		Build()
-	if err != nil {
-		return GreetingResult{}, err
-	}
-	ref, err := engine.StartFlow(ctx, GreetingFlowName, startToken)
+	ref, err := engine.StartFlow(ctx, GreetingFlowName, GreetingStartToken{Name: name})
 	if err != nil {
 		return GreetingResult{}, err
 	}
