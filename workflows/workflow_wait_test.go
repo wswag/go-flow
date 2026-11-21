@@ -95,7 +95,7 @@ func TestWaitingParentFailsWhenChildActionFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := svc.RegisterFlow(Flow{Name: "waiting-parent", Nodes: []FlowNode{{Name: "wait", Action: func(ctx context.Context, raw string, runtime Runtime) (string, error) {
-		ref, err := runtime.StartFlow(ctx, "failing-child", raw)
+		ref, err := runtime.StartFlowRaw(ctx, "failing-child", raw)
 		if err != nil {
 			return "", err
 		}

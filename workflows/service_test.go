@@ -519,7 +519,7 @@ func TestServiceParentAwaitsChildByReference(t *testing.T) {
 					if err := reader.Input(&input); err != nil {
 						return "", err
 					}
-					ref, err := runtime.StartFlow(ctx, "joined-child", rawInput)
+					ref, err := runtime.StartFlowRaw(ctx, "joined-child", rawInput)
 					if err != nil {
 						return "", err
 					}
@@ -623,7 +623,7 @@ func TestServiceMissingChildStartFailsParent(t *testing.T) {
 		Nodes: []FlowNode{{
 			Name: "trigger",
 			Action: func(ctx context.Context, rawInput string, runtime Runtime) (string, error) {
-				_, err := runtime.StartFlow(ctx, "missing-child", rawInput)
+				_, err := runtime.StartFlowRaw(ctx, "missing-child", rawInput)
 				if err != nil {
 					return "", err
 				}
@@ -848,7 +848,7 @@ func TestServiceRetryRestartsFailedChildWorkflow(t *testing.T) {
 		Name: "retry-parent",
 		Nodes: []FlowNode{
 			{Name: "trigger", Action: func(ctx context.Context, rawInput string, runtime Runtime) (string, error) {
-				ref, err := runtime.StartFlow(ctx, "retry-child", rawInput)
+				ref, err := runtime.StartFlowRaw(ctx, "retry-child", rawInput)
 				if err != nil {
 					return "", err
 				}
@@ -1093,7 +1093,7 @@ func TestServiceActionCanStartAnotherFlow(t *testing.T) {
 					if err := reader.Input(&input); err != nil {
 						return "", err
 					}
-					ref, err := runtime.StartFlow(ctx, "child", rawInput)
+					ref, err := runtime.StartFlowRaw(ctx, "child", rawInput)
 					if err != nil {
 						return "", err
 					}
