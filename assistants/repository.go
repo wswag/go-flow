@@ -194,6 +194,23 @@ func (r *Repository) UpdateAccess(ctx context.Context, name string, key StateKey
 		Updates(map[string]any{"access_ref": strings.TrimSpace(accessRef), "access_token": accessToken, "updated_at": time.Now().UTC()}).Error
 }
 
+// ReassignRun moves a run to a new scope and actor while preserving its draft ID and state.
+func (r *Repository) ReassignRun(ctx context.Context, name string, key StateKey, scopeKey, actorKey string) error {
+	if strings.TrimSpace(key.DraftID) == "" {
+		return errors.New("assistant run draft id is required")
+	}
+	result := r.db.WithContext(ctx).Model(&ChainRecord{}).
+		Where("name = ? AND scope_key = ? AND actor_key = ? AND draft_id = ?", strings.TrimSpace(name), strings.TrimSpace(key.ScopeKey), strings.TrimSpace(key.ActorKey), strings.TrimSpace(key.DraftID)).
+		Updates(map[string]any{"scope_key": strings.TrimSpace(scopeKey), "actor_key": strings.TrimSpace(actorKey), "updated_at": time.Now().UTC()})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
+
 // ClaimAction atomically reserves an action key once within the assistant run.
 func (r *Repository) ClaimAction(ctx context.Context, name string, key StateKey, actionKey string) (bool, error) {
 	claim := ActionClaim{DraftID: strings.TrimSpace(key.DraftID), ActionKey: strings.TrimSpace(actionKey), CreatedAt: time.Now().UTC()}

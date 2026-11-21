@@ -413,6 +413,23 @@ func (s *Service) ResolveRun(ctx context.Context, name string, key StateKey) (Dr
 	return DraftSession{AssistantName: record.Name, Key: key, AccessRef: record.AccessRef, AccessToken: record.AccessToken, ExpiresAt: record.AccessExpiresAt}, nil
 }
 
+// ReassignRun moves a run to a new scope and actor while preserving its DraftID.
+func (s *Service) ReassignRun(ctx context.Context, name string, key StateKey, scopeKey, actorKey string) (StateKey, error) {
+	chain, err := s.compiledChain(name)
+	if err != nil {
+		return StateKey{}, err
+	}
+	if s.repo == nil {
+		return StateKey{}, errors.New("assistant repository is not configured")
+	}
+	scopeKey = strings.TrimSpace(scopeKey)
+	actorKey = strings.TrimSpace(actorKey)
+	if err := s.repo.ReassignRun(ctx, chain.name, key, scopeKey, actorKey); err != nil {
+		return StateKey{}, err
+	}
+	return StateKey{ScopeKey: scopeKey, ActorKey: actorKey, DraftID: strings.TrimSpace(key.DraftID)}, nil
+}
+
 // ExtendRun refreshes the optional expiration deadline for a run.
 func (s *Service) ExtendRun(ctx context.Context, name string, key StateKey, lifetime time.Duration) error {
 	if lifetime <= 0 {
