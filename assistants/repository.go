@@ -2,6 +2,8 @@ package assistants
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -31,7 +33,66 @@ func AutoMigrate(db *gorm.DB) error {
 	if err := db.AutoMigrate(&ChainRecord{}, &ActionClaim{}); err != nil {
 		return err
 	}
-	return ensureMariaDBLongTextColumn(db, &ChainRecord{}, "state_json")
+	if err := ensureMariaDBLongTextColumn(db, &ChainRecord{}, "state_json"); err != nil {
+		return err
+	}
+	return migrateLegacyRuns(db)
+}
+
+func migrateLegacyRuns(db *gorm.DB) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		var records []ChainRecord
+		if err := tx.Where("draft_id IS NULL OR draft_id = '' OR status IS NULL OR status = ''").Find(&records).Error; err != nil {
+			return err
+		}
+		for _, record := range records {
+			updates := map[string]any{}
+			if strings.TrimSpace(record.DraftID) == "" {
+				draftID, err := newDraftID()
+				if err != nil {
+					return err
+				}
+				updates["draft_id"] = draftID
+			}
+			if strings.TrimSpace(record.Status) == "" {
+				status, err := legacyRunStatus(record.StateJSON)
+				if err != nil {
+					return err
+				}
+				updates["status"] = string(status)
+			}
+			if len(updates) > 0 {
+				if err := tx.Model(&ChainRecord{}).Where("id = ?", record.ID).Updates(updates).Error; err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+}
+
+func newDraftID() (string, error) {
+	var id [24]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(id[:]), nil
+}
+
+func legacyRunStatus(stateJSON string) (RunStatus, error) {
+	var state struct {
+		CompletedAt *time.Time `json:"completedAt"`
+	}
+	if strings.TrimSpace(stateJSON) == "" {
+		stateJSON = "{}"
+	}
+	if err := json.Unmarshal([]byte(stateJSON), &state); err != nil {
+		return "", err
+	}
+	if state.CompletedAt != nil {
+		return RunStatusCompleted, nil
+	}
+	return RunStatusActive, nil
 }
 
 func ensureMariaDBLongTextColumn(db *gorm.DB, model any, column string) error {
@@ -93,6 +154,32 @@ func (r *Repository) FindRecordsByKey(ctx context.Context, key StateKey) ([]Chai
 	return records, err
 }
 
+// FindOpenRun returns the newest unfinished, non-discarded assistant run for an actor and scope.
+// A completedAt value in the persisted state is honored for records written before run statuses existed.
+func (r *Repository) FindOpenRun(ctx context.Context, key StateKey) (ChainRecord, error) {
+	var records []ChainRecord
+	err := r.db.WithContext(ctx).
+		Where("scope_key = ? AND actor_key = ?", strings.TrimSpace(key.ScopeKey), strings.TrimSpace(key.ActorKey)).
+		Where("(status IS NULL OR status = '' OR status NOT IN ?)", []string{string(RunStatusCompleted), string(RunStatusDiscarded)}).
+		Order("created_at desc, id desc").
+		Find(&records).Error
+	if err != nil {
+		return ChainRecord{}, err
+	}
+	for _, record := range records {
+		var state struct {
+			CompletedAt *time.Time `json:"completedAt"`
+		}
+		if err := json.Unmarshal([]byte(record.StateJSON), &state); err != nil {
+			return ChainRecord{}, err
+		}
+		if state.CompletedAt == nil {
+			return record, nil
+		}
+	}
+	return ChainRecord{}, gorm.ErrRecordNotFound
+}
+
 // FindRecordsByAccessRef finds states sharing an application-defined selector.
 func (r *Repository) FindRecordsByAccessRef(ctx context.Context, accessRef string) ([]ChainRecord, error) {
 	var records []ChainRecord
@@ -105,6 +192,23 @@ func (r *Repository) UpdateAccess(ctx context.Context, name string, key StateKey
 	return r.db.WithContext(ctx).Model(&ChainRecord{}).
 		Where("name = ? AND scope_key = ? AND actor_key = ? AND draft_id = ?", strings.TrimSpace(name), strings.TrimSpace(key.ScopeKey), strings.TrimSpace(key.ActorKey), strings.TrimSpace(key.DraftID)).
 		Updates(map[string]any{"access_ref": strings.TrimSpace(accessRef), "access_token": accessToken, "updated_at": time.Now().UTC()}).Error
+}
+
+// ReassignRun moves a run to a new scope and actor while preserving its draft ID and state.
+func (r *Repository) ReassignRun(ctx context.Context, name string, key StateKey, scopeKey, actorKey string) error {
+	if strings.TrimSpace(key.DraftID) == "" {
+		return errors.New("assistant run draft id is required")
+	}
+	result := r.db.WithContext(ctx).Model(&ChainRecord{}).
+		Where("name = ? AND scope_key = ? AND actor_key = ? AND draft_id = ?", strings.TrimSpace(name), strings.TrimSpace(key.ScopeKey), strings.TrimSpace(key.ActorKey), strings.TrimSpace(key.DraftID)).
+		Updates(map[string]any{"scope_key": strings.TrimSpace(scopeKey), "actor_key": strings.TrimSpace(actorKey), "updated_at": time.Now().UTC()})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 // ClaimAction atomically reserves an action key once within the assistant run.

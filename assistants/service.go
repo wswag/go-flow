@@ -330,12 +330,15 @@ func NewService(repo *Repository) *Service {
 // NewRun creates an independent assistant run beneath a scope and actor.
 // DraftID identifies the run; access metadata remains application-owned.
 type NewRunOptions struct {
+	AccessRef         string
+	AccessToken       string
+	ReuseOpen         bool
 	DiscardOpen       bool
 	ExpiresIn         time.Duration
 	ExtendTTLOnAction bool
 }
 
-func (s *Service) NewRun(ctx context.Context, chainName string, key StateKey, accessRef, accessToken string, options ...NewRunOptions) (StateKey, error) {
+func (s *Service) NewRun(ctx context.Context, chainName string, key StateKey, options ...NewRunOptions) (StateKey, error) {
 	chain, err := s.compiledChain(chainName)
 	if err != nil {
 		return StateKey{}, err
@@ -359,6 +362,16 @@ func (s *Service) NewRun(ctx context.Context, chainName string, key StateKey, ac
 	if len(options) > 0 {
 		opt = options[0]
 	}
+	if opt.ReuseOpen {
+		record, err := s.repo.FindOpenRun(ctx, key)
+		if err == nil {
+			if record.Name == chain.name && (record.AccessExpiresAt == nil || record.AccessExpiresAt.After(time.Now().UTC())) {
+				return StateKey{ScopeKey: record.ScopeKey, ActorKey: record.ActorKey, DraftID: record.DraftID}, nil
+			}
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return StateKey{}, err
+		}
+	}
 	if opt.DiscardOpen {
 		if err := s.repo.DiscardOpenRuns(ctx, chain.name, key); err != nil {
 			return StateKey{}, err
@@ -369,7 +382,7 @@ func (s *Service) NewRun(ctx context.Context, chainName string, key StateKey, ac
 		expiry := time.Now().UTC().Add(opt.ExpiresIn)
 		expiresAt = &expiry
 	}
-	err = s.repo.CreateRun(ctx, &ChainRecord{Name: chain.name, ScopeKey: key.ScopeKey, ActorKey: key.ActorKey, DraftID: key.DraftID, AccessRef: strings.TrimSpace(accessRef), AccessToken: accessToken, AccessExpiresAt: expiresAt, AutoExtendTTL: opt.ExtendTTLOnAction, RunTTLSeconds: int64(opt.ExpiresIn / time.Second), Status: string(RunStatusActive), StateJSON: string(data)})
+	err = s.repo.CreateRun(ctx, &ChainRecord{Name: chain.name, ScopeKey: key.ScopeKey, ActorKey: key.ActorKey, DraftID: key.DraftID, AccessRef: strings.TrimSpace(opt.AccessRef), AccessToken: opt.AccessToken, AccessExpiresAt: expiresAt, AutoExtendTTL: opt.ExtendTTLOnAction, RunTTLSeconds: int64(opt.ExpiresIn / time.Second), Status: string(RunStatusActive), StateJSON: string(data)})
 	if err != nil {
 		return StateKey{}, err
 	}
@@ -400,6 +413,23 @@ func (s *Service) ResolveRun(ctx context.Context, name string, key StateKey) (Dr
 		return DraftSession{}, ErrRunExpired
 	}
 	return DraftSession{AssistantName: record.Name, Key: key, AccessRef: record.AccessRef, AccessToken: record.AccessToken, ExpiresAt: record.AccessExpiresAt}, nil
+}
+
+// ReassignRun moves a run to a new scope and actor while preserving its DraftID.
+func (s *Service) ReassignRun(ctx context.Context, name string, key StateKey, scopeKey, actorKey string) (StateKey, error) {
+	chain, err := s.compiledChain(name)
+	if err != nil {
+		return StateKey{}, err
+	}
+	if s.repo == nil {
+		return StateKey{}, errors.New("assistant repository is not configured")
+	}
+	scopeKey = strings.TrimSpace(scopeKey)
+	actorKey = strings.TrimSpace(actorKey)
+	if err := s.repo.ReassignRun(ctx, chain.name, key, scopeKey, actorKey); err != nil {
+		return StateKey{}, err
+	}
+	return StateKey{ScopeKey: scopeKey, ActorKey: actorKey, DraftID: strings.TrimSpace(key.DraftID)}, nil
 }
 
 // ExtendRun refreshes the optional expiration deadline for a run.
