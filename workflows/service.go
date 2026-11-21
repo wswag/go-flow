@@ -470,6 +470,7 @@ func (s *Service) startFlowAtNode(ctx context.Context, name string, startToken s
 		}
 		instance := &FlowInstance{
 			Name:             flow.Name,
+			FlowVersion:      intPointer(flow.Version),
 			Status:           FlowStatusRunning,
 			IdempotencyKey:   idempotencyKey,
 			CurrentNodeIndex: startNodeIndex,
@@ -677,11 +678,15 @@ func (s *Service) ResumeFlowInstance(ctx context.Context, ref FlowRef) (*FlowExe
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.flowDefinition(instance.Name); err != nil {
+	definition, err := s.flowDefinition(instance.Name)
+	if err != nil {
 		return nil, err
 	}
 	if instance.Status == FlowStatusFinished || instance.Status == FlowStatusFailed {
 		return s.executionFromInstance(instance), nil
+	}
+	if err := validateFlowInstanceVersion(instance, definition); err != nil {
+		return nil, err
 	}
 
 	s.mu.Lock()
@@ -744,6 +749,9 @@ func (s *Service) RetryFlow(ctx context.Context, ref FlowRef, nodeID uint, setKe
 	}
 	definition, err := s.flowDefinition(instance.Name)
 	if err != nil {
+		return 0, err
+	}
+	if err := validateFlowInstanceVersion(instance, definition); err != nil {
 		return 0, err
 	}
 	if instance.Status != FlowStatusFailed {
@@ -1460,8 +1468,26 @@ func (s *Service) loadExecutionState(ctx context.Context, flowInstanceID uint) (
 	if err != nil {
 		return FlowInstance{}, Flow{}, err
 	}
+	if err := validateFlowInstanceVersion(instance, flow); err != nil {
+		return FlowInstance{}, Flow{}, err
+	}
 	return instance, flow, nil
 }
+
+func validateFlowInstanceVersion(instance FlowInstance, flow Flow) error {
+	if instance.FlowVersion == nil {
+		return fmt.Errorf("flow %q instance %d has unknown legacy version and cannot be restarted", instance.Name, instance.ID)
+	}
+	if *instance.FlowVersion == 0 {
+		return fmt.Errorf("flow %q instance %d has version 0 and cannot be restarted", instance.Name, instance.ID)
+	}
+	if *instance.FlowVersion != flow.Version {
+		return fmt.Errorf("flow %q instance %d uses version %d, registered version is %d", instance.Name, instance.ID, *instance.FlowVersion, flow.Version)
+	}
+	return nil
+}
+
+func intPointer(value int) *int { return &value }
 
 // prepareNodeForExecution loads or creates the current node checkpoint and
 // returns the input token for its action.
