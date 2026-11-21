@@ -42,14 +42,11 @@ func AutoMigrate(db *gorm.DB) error {
 func migrateLegacyRuns(db *gorm.DB) error {
 	return db.Transaction(func(tx *gorm.DB) error {
 		var records []ChainRecord
-		if err := tx.Where("draft_id IS NULL OR draft_id = '' OR status IS NULL OR status = '' OR version IS NULL OR version = ''").Find(&records).Error; err != nil {
+		if err := tx.Where("draft_id IS NULL OR draft_id = '' OR status IS NULL OR status = ''").Find(&records).Error; err != nil {
 			return err
 		}
 		for _, record := range records {
 			updates := map[string]any{}
-			if strings.TrimSpace(record.Version) == "" {
-				updates["version"] = DefaultChainVersion
-			}
 			if strings.TrimSpace(record.DraftID) == "" {
 				draftID, err := newDraftID()
 				if err != nil {
@@ -159,10 +156,13 @@ func (r *Repository) FindRecordsByKey(ctx context.Context, key StateKey) ([]Chai
 
 // FindOpenRun returns the newest unfinished, non-discarded run for an assistant version and actor/scope.
 // A completedAt value in the persisted state is honored for records written before run statuses existed.
-func (r *Repository) FindOpenRun(ctx context.Context, name, version string, key StateKey) (ChainRecord, error) {
+func (r *Repository) FindOpenRun(ctx context.Context, name string, version int, key StateKey) (ChainRecord, error) {
+	if version == 0 {
+		return ChainRecord{}, gorm.ErrRecordNotFound
+	}
 	var records []ChainRecord
 	err := r.db.WithContext(ctx).
-		Where("name = ? AND version = ? AND scope_key = ? AND actor_key = ?", strings.TrimSpace(name), strings.TrimSpace(version), strings.TrimSpace(key.ScopeKey), strings.TrimSpace(key.ActorKey)).
+		Where("name = ? AND version = ? AND scope_key = ? AND actor_key = ?", strings.TrimSpace(name), version, strings.TrimSpace(key.ScopeKey), strings.TrimSpace(key.ActorKey)).
 		Where("(status IS NULL OR status = '' OR status NOT IN ?)", []string{string(RunStatusCompleted), string(RunStatusDiscarded)}).
 		Order("created_at desc, id desc").
 		Find(&records).Error
@@ -240,7 +240,6 @@ func (r *Repository) SaveRecord(ctx context.Context, record *ChainRecord) error 
 	}
 	now := time.Now().UTC()
 	record.Name = strings.TrimSpace(record.Name)
-	record.Version = strings.TrimSpace(record.Version)
 	record.ScopeKey = strings.TrimSpace(record.ScopeKey)
 	record.ActorKey = strings.TrimSpace(record.ActorKey)
 	if record.CreatedAt.IsZero() {
