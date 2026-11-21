@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/wswag/go-flow/tokens"
@@ -111,20 +113,26 @@ func TestAssistantServiceAdvancePendingChainsHonorsAutoCommitPredicate(t *testin
 				Name:     "workflow_wait",
 				Sequence: 20,
 				Input:    map[string]any{"workflowId": workflowID},
-				Prepare: func(context.Context, PrepareContext) (any, error) {
+				Prepare: func(_ context.Context, prepare PrepareContext) (any, error) {
+					if len(prepare.WorkflowIDs) != 2 || prepare.WorkflowIDs[0] != 41 || prepare.WorkflowIDs[1] != 42 {
+						t.Errorf("prepare workflow IDs = %v, want [41 42]", prepare.WorkflowIDs)
+					}
 					prepareCalls++
 					return map[string]any{}, nil
 				},
-				WorkflowReference: func(_ context.Context, result ClientResultContext) (uint, error) {
+				WorkflowReference: func(_ context.Context, result ClientResultContext) ([]uint, error) {
 					var ref struct {
 						WorkflowID uint `json:"workflowId"`
 					}
 					if err := json.Unmarshal(result.Step.Input, &ref); err != nil {
-						return 0, err
+						return nil, err
 					}
-					return ref.WorkflowID, nil
+					return []uint{ref.WorkflowID, 42}, nil
 				},
-				AutoCommit: AutoCommitDefinition{Predicate: func(context.Context, PrepareContext) (bool, error) {
+				AutoCommit: AutoCommitDefinition{Predicate: func(_ context.Context, prepare PrepareContext) (bool, error) {
+					if len(prepare.WorkflowIDs) != 2 || prepare.WorkflowIDs[0] != 41 || prepare.WorkflowIDs[1] != 42 {
+						t.Errorf("predicate workflow IDs = %v, want [41 42]", prepare.WorkflowIDs)
+					}
 					return allWorkflowPartsFinished, nil
 				}},
 			},
@@ -153,8 +161,14 @@ func TestAssistantServiceAdvancePendingChainsHonorsAutoCommitPredicate(t *testin
 		t.Fatalf("unrelated workflow event advanced chain: chains=%#v prepareCalls=%d", chains, prepareCalls)
 	}
 
-	allWorkflowPartsFinished = true
 	chains, err = svc.AdvancePendingChains(context.Background(), key, workflowID)
+	if err != nil || len(chains) != 1 || chains[0].Completed {
+		t.Fatalf("first workflow must not complete chain: chains=%#v err=%v", chains, err)
+	}
+	<-events
+
+	allWorkflowPartsFinished = true
+	chains, err = svc.AdvancePendingChains(context.Background(), key, 42)
 	if err != nil {
 		t.Fatalf("advance completed workflows: %v", err)
 	}
@@ -162,6 +176,47 @@ func TestAssistantServiceAdvancePendingChainsHonorsAutoCommitPredicate(t *testin
 		t.Fatalf("completed workflow state = %#v, want completed chain", chains)
 	}
 	<-events
+}
+
+func TestAssistantServiceConcurrentWorkflowEventsCommitOnce(t *testing.T) {
+	svc := openAssistantTestService(t)
+	var commits atomic.Int32
+	if err := svc.RegisterChain(ChainDefinition{
+		Name: "parallel-wait", CompletionBehavior: ChainCompletionKeepComplete,
+		Steps: []StepDefinition{{Name: "wait", Sequence: 10,
+			WorkflowReference: func(context.Context, ClientResultContext) ([]uint, error) { return []uint{41, 42}, nil },
+			AutoCommit: AutoCommitDefinition{
+				Predicate: func(context.Context, PrepareContext) (bool, error) { return true, nil },
+				Commit:    func(context.Context, CommitContext) (*CommitOutcome, error) { commits.Add(1); return nil, nil },
+			},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	key := newAssistantTestRun(t, svc, "parallel-wait", StateKey{ScopeKey: "scope:1", ActorKey: "actor:1"})
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for _, id := range []uint{41, 42} {
+		wg.Add(1)
+		go func(id uint) {
+			defer wg.Done()
+			<-start
+			_, err := svc.AdvancePendingChains(context.Background(), key, id)
+			errs <- err
+		}(id)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := commits.Load(); got != 1 {
+		t.Fatalf("commit count = %d, want 1", got)
+	}
 }
 
 func TestAssistantServiceAdvancePendingChainsSkipsUnrelatedPrepare(t *testing.T) {
@@ -179,14 +234,14 @@ func TestAssistantServiceAdvancePendingChainsSkipsUnrelatedPrepare(t *testing.T)
 					prepareCalls++
 					return nil, nil
 				},
-				WorkflowReference: func(_ context.Context, result ClientResultContext) (uint, error) {
+				WorkflowReference: func(_ context.Context, result ClientResultContext) ([]uint, error) {
 					var ref struct {
 						WorkflowID uint `json:"workflowId"`
 					}
 					if err := json.Unmarshal(result.Step.Input, &ref); err != nil {
-						return 0, err
+						return nil, err
 					}
-					return ref.WorkflowID, nil
+					return []uint{ref.WorkflowID}, nil
 				},
 				AutoCommit: AutoCommitDefinition{Predicate: func(context.Context, PrepareContext) (bool, error) { return true, nil }},
 			},
@@ -236,14 +291,14 @@ func TestAssistantServiceAdvancePendingChainsOnlyAdvancesMatchingWorkflow(t *tes
 						prepareCalls[test.name]++
 						return nil, nil
 					},
-					WorkflowReference: func(_ context.Context, result ClientResultContext) (uint, error) {
+					WorkflowReference: func(_ context.Context, result ClientResultContext) ([]uint, error) {
 						var ref struct {
 							WorkflowID uint `json:"workflowId"`
 						}
 						if err := json.Unmarshal(result.Step.Input, &ref); err != nil {
-							return 0, err
+							return nil, err
 						}
-						return ref.WorkflowID, nil
+						return []uint{ref.WorkflowID}, nil
 					},
 					AutoCommit: AutoCommitDefinition{Predicate: func(context.Context, PrepareContext) (bool, error) { return true, nil }},
 				},
