@@ -11,6 +11,8 @@ import (
 
 var ErrRunExpired = errors.New("assistant run expired")
 
+const DefaultChainVersion = "1"
+
 type DraftSession struct {
 	AssistantName string
 	Key           StateKey
@@ -24,6 +26,7 @@ type DraftSession struct {
 type ChainRecord struct {
 	ID       uint   `gorm:"primaryKey"`
 	Name     string `gorm:"type:varchar(120);index;uniqueIndex:idx_assistant_chain_scope_actor_draft,priority:1"`
+	Version  string `gorm:"type:varchar(64);index"`
 	ScopeKey string `gorm:"type:varchar(255);index;uniqueIndex:idx_assistant_chain_scope_actor_draft,priority:2"`
 	ActorKey string `gorm:"type:varchar(120);index;uniqueIndex:idx_assistant_chain_scope_actor_draft,priority:3"`
 	DraftID  string `gorm:"type:varchar(64);index;uniqueIndex:idx_assistant_chain_scope_actor_draft,priority:4"`
