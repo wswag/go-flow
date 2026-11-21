@@ -93,6 +93,32 @@ func (r *Repository) FindRecordsByKey(ctx context.Context, key StateKey) ([]Chai
 	return records, err
 }
 
+// FindOpenRun returns the newest unfinished, non-discarded assistant run for an actor and scope.
+// A completedAt value in the persisted state is honored for records written before run statuses existed.
+func (r *Repository) FindOpenRun(ctx context.Context, key StateKey) (ChainRecord, error) {
+	var records []ChainRecord
+	err := r.db.WithContext(ctx).
+		Where("scope_key = ? AND actor_key = ?", strings.TrimSpace(key.ScopeKey), strings.TrimSpace(key.ActorKey)).
+		Where("(status IS NULL OR status = '' OR status NOT IN ?)", []string{string(RunStatusCompleted), string(RunStatusDiscarded)}).
+		Order("created_at desc, id desc").
+		Find(&records).Error
+	if err != nil {
+		return ChainRecord{}, err
+	}
+	for _, record := range records {
+		var state struct {
+			CompletedAt *time.Time `json:"completedAt"`
+		}
+		if err := json.Unmarshal([]byte(record.StateJSON), &state); err != nil {
+			return ChainRecord{}, err
+		}
+		if state.CompletedAt == nil {
+			return record, nil
+		}
+	}
+	return ChainRecord{}, gorm.ErrRecordNotFound
+}
+
 // FindRecordsByAccessRef finds states sharing an application-defined selector.
 func (r *Repository) FindRecordsByAccessRef(ctx context.Context, accessRef string) ([]ChainRecord, error) {
 	var records []ChainRecord

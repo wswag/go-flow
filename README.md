@@ -266,7 +266,7 @@ runKey, err := service.NewRun(ctx, "onboarding", assistants.StateKey{
 	ScopeKey: "organization:12",
 	ActorKey: "anonymous",
 }, "draft:requested-by-app", tokenHash, assistants.NewRunOptions{
-	DiscardOpen: true,
+	ReuseOpen: true,
 })
 if err != nil {
 	return err
@@ -281,6 +281,8 @@ which is already the next step after a successful transition. To start over,
 discard the old run and call `NewRun` again. Generic one-off operations can
 also use `service.ClaimAction(ctx, chainName, runKey, actionKey)`; it returns
 `true` only for the first claim. Discarding the run removes its action claims.
+Set `ReuseOpen` to return the newest unfinished run for the same actor and
+scope. Set `DiscardOpen` to discard unfinished runs before creating a new one.
 Set `ExpiresIn` in `NewRunOptions` to enable expiration. `ResolveRun` checks the
 deadline and `ExtendRun` refreshes it. `CleanupRuns` accepts combined filters:
 

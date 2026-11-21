@@ -330,6 +330,7 @@ func NewService(repo *Repository) *Service {
 // NewRun creates an independent assistant run beneath a scope and actor.
 // DraftID identifies the run; access metadata remains application-owned.
 type NewRunOptions struct {
+	ReuseOpen         bool
 	DiscardOpen       bool
 	ExpiresIn         time.Duration
 	ExtendTTLOnAction bool
@@ -358,6 +359,16 @@ func (s *Service) NewRun(ctx context.Context, chainName string, key StateKey, ac
 	opt := NewRunOptions{}
 	if len(options) > 0 {
 		opt = options[0]
+	}
+	if opt.ReuseOpen {
+		record, err := s.repo.FindOpenRun(ctx, key)
+		if err == nil {
+			if record.Name == chain.name && (record.AccessExpiresAt == nil || record.AccessExpiresAt.After(time.Now().UTC())) {
+				return StateKey{ScopeKey: record.ScopeKey, ActorKey: record.ActorKey, DraftID: record.DraftID}, nil
+			}
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return StateKey{}, err
+		}
 	}
 	if opt.DiscardOpen {
 		if err := s.repo.DiscardOpenRuns(ctx, chain.name, key); err != nil {
