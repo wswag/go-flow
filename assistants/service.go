@@ -330,13 +330,15 @@ func NewService(repo *Repository) *Service {
 // NewRun creates an independent assistant run beneath a scope and actor.
 // DraftID identifies the run; access metadata remains application-owned.
 type NewRunOptions struct {
+	AccessRef         string
+	AccessToken       string
 	ReuseOpen         bool
 	DiscardOpen       bool
 	ExpiresIn         time.Duration
 	ExtendTTLOnAction bool
 }
 
-func (s *Service) NewRun(ctx context.Context, chainName string, key StateKey, accessRef, accessToken string, options ...NewRunOptions) (StateKey, error) {
+func (s *Service) NewRun(ctx context.Context, chainName string, key StateKey, options ...NewRunOptions) (StateKey, error) {
 	chain, err := s.compiledChain(chainName)
 	if err != nil {
 		return StateKey{}, err
@@ -380,7 +382,7 @@ func (s *Service) NewRun(ctx context.Context, chainName string, key StateKey, ac
 		expiry := time.Now().UTC().Add(opt.ExpiresIn)
 		expiresAt = &expiry
 	}
-	err = s.repo.CreateRun(ctx, &ChainRecord{Name: chain.name, ScopeKey: key.ScopeKey, ActorKey: key.ActorKey, DraftID: key.DraftID, AccessRef: strings.TrimSpace(accessRef), AccessToken: accessToken, AccessExpiresAt: expiresAt, AutoExtendTTL: opt.ExtendTTLOnAction, RunTTLSeconds: int64(opt.ExpiresIn / time.Second), Status: string(RunStatusActive), StateJSON: string(data)})
+	err = s.repo.CreateRun(ctx, &ChainRecord{Name: chain.name, ScopeKey: key.ScopeKey, ActorKey: key.ActorKey, DraftID: key.DraftID, AccessRef: strings.TrimSpace(opt.AccessRef), AccessToken: opt.AccessToken, AccessExpiresAt: expiresAt, AutoExtendTTL: opt.ExtendTTLOnAction, RunTTLSeconds: int64(opt.ExpiresIn / time.Second), Status: string(RunStatusActive), StateJSON: string(data)})
 	if err != nil {
 		return StateKey{}, err
 	}

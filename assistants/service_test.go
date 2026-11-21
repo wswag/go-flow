@@ -27,7 +27,7 @@ func openAssistantTestService(t *testing.T) *Service {
 
 func newAssistantTestRun(t *testing.T, svc *Service, chainName string, key StateKey) StateKey {
 	t.Helper()
-	runKey, err := svc.NewRun(context.Background(), chainName, key, "", "")
+	runKey, err := svc.NewRun(context.Background(), chainName, key)
 	if err != nil {
 		t.Fatalf("create assistant test run: %v", err)
 	}

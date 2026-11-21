@@ -265,8 +265,10 @@ independent application-owned access metadata.
 runKey, err := service.NewRun(ctx, "onboarding", assistants.StateKey{
 	ScopeKey: "organization:12",
 	ActorKey: "anonymous",
-}, "draft:requested-by-app", tokenHash, assistants.NewRunOptions{
-	ReuseOpen: true,
+}, assistants.NewRunOptions{
+	AccessRef:   "draft:requested-by-app",
+	AccessToken: tokenHash,
+	ReuseOpen:   true,
 })
 if err != nil {
 	return err
