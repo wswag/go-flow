@@ -1179,7 +1179,7 @@ func (s *Service) commitStep(ctx context.Context, chainName string, key StateKey
 	}
 	var outcome *CommitOutcome
 	commitFn := stepDef.Commit
-	if isCommittedUpdate {
+	if isCommittedUpdate && stepDef.UpdatePolicy.Commit != nil {
 		commitFn = stepDef.UpdatePolicy.Commit
 	}
 	outcome, err = s.invokeCommit(ctx, chain.name, key, stepDef, commitFn, commitCtx)
