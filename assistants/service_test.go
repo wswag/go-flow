@@ -390,6 +390,9 @@ func TestAssistantServicePrepareAndPatchMergeInput(t *testing.T) {
 		t.Fatalf("register chain: %v", err)
 	}
 	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
+	if _, _, err := svc.CommitStep(context.Background(), "demo", key, "first"); err != nil {
+		t.Fatalf("enter second step: %v", err)
+	}
 	if _, _, err := svc.UpdateStepInput(context.Background(), "demo", key, "second", map[string]any{
 		"kind": "patched",
 	}); err != nil {
@@ -444,15 +447,21 @@ func TestAssistantServiceCurrentStepDoesNotPrepareFutureSteps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("future step: %v", err)
 	}
+	if futurePrepareCalls != 0 {
+		t.Fatalf("future prepare calls after targeted read = %d, want 0", futurePrepareCalls)
+	}
+	if _, _, err := svc.CommitStep(context.Background(), "demo", key, "first"); err != nil {
+		t.Fatalf("enter second step: %v", err)
+	}
 	if futurePrepareCalls != 1 {
-		t.Fatalf("future prepare calls after targeted step = %d, want 1", futurePrepareCalls)
+		t.Fatalf("prepare calls after entering step = %d, want 1", futurePrepareCalls)
 	}
 	var input map[string]any
 	if err := json.Unmarshal(step.Input, &input); err != nil {
 		t.Fatalf("unmarshal input: %v", err)
 	}
-	if input["prepared"] != true {
-		t.Fatalf("prepared input = %#v, want true", input["prepared"])
+	if input["prepared"] != nil {
+		t.Fatalf("read unexpectedly ran prepare: %#v", input)
 	}
 }
 
@@ -919,18 +928,17 @@ func TestAssistantServiceStepSnapshotSeparatesPreparedInputAndPatch(t *testing.T
 		t.Fatalf("register chain: %v", err)
 	}
 	key := newAssistantTestRun(t, svc, "demo", StateKey{ScopeKey: "scope:1"})
+	if _, _, err := svc.CommitStep(context.Background(), "demo", key, "first"); err != nil {
+		t.Fatalf("enter second step: %v", err)
+	}
 	step, _, err := svc.UpdateStepInput(context.Background(), "demo", key, "second", map[string]any{
 		"userField": "custom",
 	})
 	if err != nil {
 		t.Fatalf("update second input: %v", err)
 	}
-	var prepared map[string]any
-	if err := json.Unmarshal(step.PreparedInput, &prepared); err != nil {
-		t.Fatalf("unmarshal prepared input: %v", err)
-	}
-	if _, ok := prepared["prepared"]; !ok {
-		t.Fatalf("prepared input missing prepared field: %#v", prepared)
+	if len(step.PreparedInput) != 0 && string(step.PreparedInput) != "{}" {
+		t.Fatalf("snapshot contains transient prepared input: %s", step.PreparedInput)
 	}
 	var patch map[string]any
 	if err := json.Unmarshal(step.InputPatch, &patch); err != nil {

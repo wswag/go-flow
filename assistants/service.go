@@ -174,12 +174,16 @@ const (
 type StepDefinition struct {
 	// Name uniquely identifies this step within the chain.
 	Name string
-	// Sequence determines default order; lower values run first.
+	// Sequence determines order; lower values run first. Equal or non-positive
+	// values retain the step's position in ChainDefinition.Steps.
 	Sequence int
 	// Input is the initial input model, encoded as JSON.
 	Input any
 	// Prepare derives the step input from earlier run state.
 	Prepare PrepareFunc
+	// PrepareOncePerRun executes Prepare at most once for this run, using a persistent
+	// claim. The callback can use PrepareContext.IdempotencyKey externally.
+	PrepareOncePerRun bool
 	// Commit runs when the step is manually committed.
 	Commit CommitFunc
 	// AutoCommit optionally commits the step when its predicate becomes true.
@@ -209,7 +213,8 @@ type ChainDefinition struct {
 	// UserInterfaces are shared by every run of this registered assistant.
 	// UserInterfaces are dependencies shared by every run of this assistant.
 	UserInterfaces []any
-	// Steps are ordered by Sequence.
+	// Steps are ordered by Sequence; equal or non-positive values retain their
+	// order in this slice.
 	Steps []StepDefinition
 	// Precondition validates application-specific conditions before operations.
 	Precondition ChainPreconditionFunc
@@ -269,6 +274,9 @@ type PrepareContext struct {
 	// Steps intentionally contains only earlier prepared steps, so a wait step
 	// can otherwise not resolve a workflow reference it just replaced itself.
 	CurrentResult json.RawMessage
+	// IdempotencyKey is stable for this run and step and can deduplicate effects
+	// performed by Prepare callbacks.
+	IdempotencyKey string
 	assistantUserInterfaceDependencies
 }
 
@@ -345,6 +353,7 @@ type compiledStep struct {
 	Sequence             int
 	Input                json.RawMessage
 	Prepare              PrepareFunc
+	PrepareOncePerRun    bool
 	Commit               CommitFunc
 	AutoCommit           AutoCommitDefinition
 	UpdatePolicy         UpdatePolicyDefinition
@@ -363,6 +372,7 @@ type persistedChainState struct {
 
 type persistedStepState struct {
 	InputPatch  json.RawMessage `json:"inputPatch,omitempty"`
+	Prepared    bool            `json:"prepared,omitempty"`
 	Result      json.RawMessage `json:"result,omitempty"`
 	CompletedAt *time.Time      `json:"completedAt,omitempty"`
 	StaleAt     *time.Time      `json:"staleAt,omitempty"`
@@ -589,6 +599,7 @@ func (s *Service) RegisterChain(def ChainDefinition) error {
 			Sequence:             step.Sequence,
 			Input:                defaultInput,
 			Prepare:              step.Prepare,
+			PrepareOncePerRun:    step.PrepareOncePerRun,
 			Commit:               step.Commit,
 			AutoCommit:           step.AutoCommit,
 			UpdatePolicy:         step.UpdatePolicy,
@@ -600,9 +611,6 @@ func (s *Service) RegisterChain(def ChainDefinition) error {
 		})
 	}
 	sort.SliceStable(steps, func(i, j int) bool {
-		if steps[i].Sequence == steps[j].Sequence {
-			return steps[i].Name < steps[j].Name
-		}
 		return steps[i].Sequence < steps[j].Sequence
 	})
 	for index, step := range steps {
@@ -1484,6 +1492,77 @@ func (s *Service) resolveCurrentChain(ctx context.Context, chainName string, key
 		if !autoCommit || snapshot.Completed {
 			return snapshot, nil
 		}
+		currentName := snapshot.CurrentStep
+		currentStep, exists := chain.stepByName[currentName]
+		if !exists {
+			return ChainSnapshot{}, fmt.Errorf("assistant step %q not found", currentName)
+		}
+		if currentStep.Prepare != nil && !state.Steps[currentName].Prepared {
+			stepSnapshot, found := findStepSnapshot(snapshot.Steps, currentName)
+			if !found {
+				return ChainSnapshot{}, fmt.Errorf("assistant step %q not found", currentName)
+			}
+			prepare := PrepareContext{
+				ChainName: chain.name, Key: key, Current: currentName, Steps: snapshot.Steps,
+				CurrentInputPatch:                  normalizeJSON(state.Steps[currentName].InputPatch),
+				CurrentResult:                      normalizeJSON(state.Steps[currentName].Result),
+				IdempotencyKey:                     commitIdempotencyKey(key, currentName),
+				assistantUserInterfaceDependencies: s.assistantInterfaceDependencies(ctx, chain),
+			}
+			prepare.WorkflowIDs, err = s.resolveWorkflowIDs(ctx, chain, key, snapshot, stepSnapshot)
+			if err != nil {
+				return ChainSnapshot{}, err
+			}
+			claimKey := "prepare:" + currentName
+			claimed := false
+			if currentStep.PrepareOncePerRun {
+				claimed, err = s.repo.ClaimAction(ctx, chain.name, key, claimKey)
+				if err != nil {
+					return ChainSnapshot{}, err
+				}
+				if !claimed {
+					return ChainSnapshot{}, fmt.Errorf("%w: prepare %s", ErrCommitClaimed, currentName)
+				}
+			}
+			prepared, prepareErr := currentStep.Prepare(ctx, prepare)
+			if prepareErr != nil {
+				if claimed {
+					_ = s.repo.ReleaseAction(ctx, key.DraftID, claimKey)
+				}
+				if errors.Is(prepareErr, workflows.ErrFlowNotRegistered) {
+					s.logAction("reset_unavailable_workflow", chain.name, key, currentName)
+					if s.repo != nil {
+						if resetErr := s.repo.DeleteRecord(ctx, chain.name, key); resetErr != nil {
+							return ChainSnapshot{}, resetErr
+						}
+					}
+					state = persistedChainState{CurrentStep: s.firstStepName(chain), Steps: map[string]persistedStepState{}}
+					continue
+				}
+				return ChainSnapshot{}, prepareErr
+			}
+			patch, marshalErr := marshalRaw(prepared)
+			if marshalErr != nil {
+				if claimed {
+					_ = s.repo.ReleaseAction(ctx, key.DraftID, claimKey)
+				}
+				return ChainSnapshot{}, marshalErr
+			}
+			stepState := state.Steps[currentName]
+			stepState.InputPatch = mergeJSON(stepState.InputPatch, patch)
+			stepState.Prepared = true
+			state.Steps[currentName] = stepState
+			if err := s.saveState(ctx, chain.name, key, state); err != nil {
+				if claimed {
+					_ = s.repo.ReleaseAction(ctx, key.DraftID, claimKey)
+				}
+				return ChainSnapshot{}, err
+			}
+			snapshot, err = s.buildChainSnapshot(ctx, chain, key, state)
+			if err != nil {
+				return ChainSnapshot{}, err
+			}
+		}
 		currentStep, ok := chain.stepByName[snapshot.CurrentStep]
 		if !ok || currentStep.AutoCommit.Predicate == nil {
 			return snapshot, nil
@@ -1635,16 +1714,7 @@ func (s *Service) buildChainSnapshotPreparedThroughUnchecked(ctx context.Context
 				return ChainSnapshot{}, err
 			}
 			prepareCtx.WorkflowIDs = workflowIDs
-			prepared, err := step.Prepare(ctx, prepareCtx)
-			if err != nil {
-				return ChainSnapshot{}, err
-			}
-			preparedRaw, err := marshalRaw(prepared)
-			if err != nil {
-				return ChainSnapshot{}, err
-			}
-			preparedInput = normalizeJSON(preparedRaw)
-			input = mergeJSON(input, preparedRaw)
+			// Prepare callbacks run when a step is entered, not during snapshot reads.
 		}
 		input = mergeJSON(input, persisted.InputPatch)
 		snapshots = append(snapshots, StepSnapshot{
@@ -2024,12 +2094,19 @@ func mergeJSON(base json.RawMessage, patch json.RawMessage) json.RawMessage {
 	if len(patch) == 0 {
 		return base
 	}
-	var baseValue any
-	if err := json.Unmarshal(base, &baseValue); err != nil {
+	decode := func(raw json.RawMessage) (any, error) {
+		decoder := json.NewDecoder(strings.NewReader(string(raw)))
+		decoder.UseNumber()
+		var value any
+		err := decoder.Decode(&value)
+		return value, err
+	}
+	baseValue, err := decode(base)
+	if err != nil {
 		return patch
 	}
-	var patchValue any
-	if err := json.Unmarshal(patch, &patchValue); err != nil {
+	patchValue, err := decode(patch)
+	if err != nil {
 		return base
 	}
 	merged := mergeJSONValue(baseValue, patchValue)
