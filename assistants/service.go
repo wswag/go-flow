@@ -20,29 +20,39 @@ import (
 	"gorm.io/gorm"
 )
 
-// PrepareFunc derives a step's input from the current run state.
+// PrepareFunc runs when its step becomes current. Its returned JSON is merged into
+// the persisted input patch, so later reads use the same prepared values.
 type PrepareFunc func(ctx context.Context, prepare PrepareContext) (any, error)
 
-// CommitFunc performs the step's action and may return a result and next step.
+// CommitFunc performs the step's action. Its outcome may persist a result and
+// override the default transition to the next step.
 type CommitFunc func(ctx context.Context, commit CommitContext) (*CommitOutcome, error)
 
-// AutoCommitPredicate reports whether an automatic step should be committed.
+// AutoCommitPredicate is evaluated for the current auto-commit step. It returns
+// whether the service should run that step's automatic commit callback.
 type AutoCommitPredicate func(ctx context.Context, prepare PrepareContext) (bool, error)
 
-// UpdatePolicyPredicate authorizes an update to a completed step.
+// UpdatePolicyPredicate decides whether changed input may be applied to a
+// completed step. Returning false rejects the update.
 type UpdatePolicyPredicate func(ctx context.Context, update UpdatePolicyContext) (bool, error)
 
-// UpdatePolicyInvalidate decides whether an update makes a later step stale.
+// UpdatePolicyInvalidate decides whether a particular later step must be
+// marked stale after the completed source step is updated.
 type UpdatePolicyInvalidate func(ctx context.Context, update UpdatePolicyContext, following StepSnapshot) (bool, error)
 
-// JumpToUnreachedPredicate permits a step to prove that it is reachable from
-// already persisted assistant state although it has no own input patch or
-// result yet. This is useful for workflow-wait steps whose parent reference is
-// stored by the preceding transition.
+// JumpToUnreachedPredicate allows a jump to skip steps that have not yet been
+// reached when existing run state proves the target is valid. Use it when a
+// target depends on data such as a workflow reference stored by an earlier
+// transition but has no input patch or result of its own.
 type JumpToUnreachedPredicate func(ctx context.Context, prepare PrepareContext) (bool, error)
 
-// ChainPreconditionFunc rejects operations when application conditions fail.
+// ChainPreconditionFunc checks application-specific access or state before a
+// chain operation. Return an error to reject the operation.
 type ChainPreconditionFunc func(ctx context.Context, key StateKey) error
+
+// CanJumpPredicate decides whether JumpToStep may skip the normal path and move
+// this run directly to the configured target step.
+type CanJumpPredicate func(ctx context.Context, draft DraftContext) (bool, error)
 
 // ClientResultContext is the trusted server-side context from which a step
 // explicitly projects the information its UI is allowed to receive.
@@ -179,10 +189,12 @@ type StepDefinition struct {
 	Sequence int
 	// Input is the initial input model, encoded as JSON.
 	Input any
-	// Prepare derives the step input from earlier run state.
+	// Prepare runs when this step becomes current and merges its returned JSON into
+	// the persisted input patch.
 	Prepare PrepareFunc
-	// PrepareOncePerRun executes Prepare at most once for this run, using a persistent
-	// claim. The callback can use PrepareContext.IdempotencyKey externally.
+	// PrepareOncePerRun claims preparation persistently so it runs at most once for
+	// this draft, even if revisited. Use the idempotency key to protect external
+	// effects if a failed attempt is retried.
 	PrepareOncePerRun bool
 	// Commit runs when the step is manually committed.
 	Commit CommitFunc
@@ -190,13 +202,20 @@ type StepDefinition struct {
 	AutoCommit AutoCommitDefinition
 	// UpdatePolicy controls edits after this step has completed.
 	UpdatePolicy UpdatePolicyDefinition
-	// AllowJumpToUnreached permits jumps here without recorded progress.
+	// AllowJumpToUnreached permits JumpToStep to skip the normal path and land here
+	// before this step has input, a result, or other recorded progress.
 	AllowJumpToUnreached bool
-	// CanJumpToUnreached conditionally authorizes such jumps.
+	// CanJumpToUnreached checks whether prior run state justifies skipping steps and
+	// landing here despite no progress recorded on this target step.
 	CanJumpToUnreached JumpToUnreachedPredicate
-	// WorkflowReference identifies workflows whose events may advance this step.
+	// CanJump decides whether JumpToStep may skip the normal path and land here. It
+	// receives the current and target steps so policy can compare names, sequences,
+	// completion state, and other run context.
+	CanJump CanJumpPredicate
+	// WorkflowReference identifies workflows whose terminal events may trigger this
+	// step's auto-commit predicate.
 	WorkflowReference WorkflowReferenceFunc
-	// ClientResult explicitly projects step data exposed to clients.
+	// ClientResult explicitly projects the step data exposed to clients.
 	ClientResult ClientResultFunc
 	// OncePerRun makes the first successful commit authoritative for this step
 	// until the chain state is discarded and a new run is started.
@@ -252,6 +271,14 @@ type ChainSnapshot struct {
 	Completed   bool           `json:"completed"`
 	CompletedAt *time.Time     `json:"completedAt,omitempty"`
 	Steps       []StepSnapshot `json:"steps"`
+}
+
+// DraftContext describes a run while deciding whether it may jump to a step.
+type DraftContext struct {
+	Key         StateKey
+	Chain       ChainSnapshot
+	CurrentStep StepSnapshot
+	TargetStep  StepSnapshot
 }
 
 // ChainEvent liefert einen serverseitig fortgeschriebenen Assistant-State an
@@ -359,6 +386,7 @@ type compiledStep struct {
 	UpdatePolicy         UpdatePolicyDefinition
 	AllowJumpToUnreached bool
 	CanJumpToUnreached   JumpToUnreachedPredicate
+	CanJump              CanJumpPredicate
 	WorkflowReference    WorkflowReferenceFunc
 	ClientResult         ClientResultFunc
 	OncePerRun           bool
@@ -605,6 +633,7 @@ func (s *Service) RegisterChain(def ChainDefinition) error {
 			UpdatePolicy:         step.UpdatePolicy,
 			AllowJumpToUnreached: step.AllowJumpToUnreached,
 			CanJumpToUnreached:   step.CanJumpToUnreached,
+			CanJump:              step.CanJump,
 			WorkflowReference:    step.WorkflowReference,
 			ClientResult:         step.ClientResult,
 			OncePerRun:           step.OncePerRun,
@@ -1366,7 +1395,21 @@ func (s *Service) JumpToStep(ctx context.Context, chainName string, key StateKey
 	if !found {
 		return StepSnapshot{}, ChainSnapshot{}, fmt.Errorf("assistant step %q not found", target)
 	}
-	if targetStep.Name != snapshot.CurrentStep && !targetStep.Completed && !hasStepProgress(targetStep) && !chain.stepByName[target].AllowJumpToUnreached {
+	canJumpConfigured := chain.stepByName[target].CanJump
+	if canJumpConfigured != nil {
+		currentStep, currentFound := findStepSnapshot(snapshot.Steps, snapshot.CurrentStep)
+		if !currentFound {
+			return StepSnapshot{}, snapshot, fmt.Errorf("assistant current step %q not found", snapshot.CurrentStep)
+		}
+		allowed, predicateErr := canJumpConfigured(ctx, DraftContext{Key: key, Chain: snapshot, CurrentStep: currentStep, TargetStep: targetStep})
+		if predicateErr != nil {
+			return StepSnapshot{}, snapshot, predicateErr
+		}
+		if !allowed {
+			return StepSnapshot{}, snapshot, fmt.Errorf("assistant step %q is not an allowed jump target", target)
+		}
+	}
+	if canJumpConfigured == nil && targetStep.Name != snapshot.CurrentStep && !targetStep.Completed && !hasStepProgress(targetStep) && !chain.stepByName[target].AllowJumpToUnreached {
 		canJump := false
 		if predicate := chain.stepByName[target].CanJumpToUnreached; predicate != nil {
 			workflowIDs, referenceErr := s.resolveWorkflowIDs(ctx, chain, key, snapshot, targetStep)
@@ -2014,6 +2057,7 @@ func (s *Service) invalidateFollowingSteps(ctx context.Context, chain compiledCh
 		}
 		followingState := state.Steps[following.Name]
 		followingState.StaleAt = &now
+		followingState.Prepared = false
 		state.Steps[following.Name] = followingState
 		s.logAction("mark_stale", chain.name, key, following.Name)
 		invalidated = true
