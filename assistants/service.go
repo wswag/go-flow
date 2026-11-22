@@ -500,6 +500,28 @@ func (s *Service) NewRun(ctx context.Context, chainName string, key StateKey, op
 	return key, nil
 }
 
+// ResolveOpenRun returns the newest open run for the registered assistant
+// version and the supplied scope and actor. It never creates or modifies a run.
+// An expired newest run returns ErrRunExpired; no matching run returns
+// gorm.ErrRecordNotFound.
+func (s *Service) ResolveOpenRun(ctx context.Context, chainName string, key StateKey) (StateKey, error) {
+	chain, err := s.compiledChain(chainName)
+	if err != nil {
+		return StateKey{}, err
+	}
+	if s.repo == nil {
+		return StateKey{}, errors.New("assistant repository is not configured")
+	}
+	record, err := s.repo.FindOpenRun(ctx, chain.name, chain.version, key)
+	if err != nil {
+		return StateKey{}, err
+	}
+	if record.AccessExpiresAt != nil && !record.AccessExpiresAt.After(time.Now().UTC()) {
+		return StateKey{}, ErrRunExpired
+	}
+	return StateKey{ScopeKey: record.ScopeKey, ActorKey: record.ActorKey, DraftID: record.DraftID}, nil
+}
+
 func (s *Service) extendRunAfterAction(ctx context.Context, name string, key StateKey) error {
 	record, err := s.repo.FindRecord(ctx, name, key)
 	if err != nil {
