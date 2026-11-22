@@ -511,7 +511,12 @@ func (s *Service) extendRunAfterAction(ctx context.Context, name string, key Sta
 	if !record.AutoExtendTTL || record.RunTTLSeconds <= 0 {
 		return nil
 	}
-	return s.repo.SetRunExpiry(ctx, name, key, time.Now().UTC().Add(time.Duration(record.RunTTLSeconds)*time.Second))
+	now := time.Now().UTC()
+	expiresAt := now.Add(time.Duration(record.RunTTLSeconds) * time.Second)
+	if record.AccessExpiresAt != nil && record.AccessExpiresAt.After(expiresAt) {
+		expiresAt = *record.AccessExpiresAt
+	}
+	return s.repo.SetRunExpiry(ctx, name, key, expiresAt)
 }
 
 // ResolveRun loads an unexpired run by its DraftID. The application validates AccessToken.
@@ -543,13 +548,30 @@ func (s *Service) ReassignRun(ctx context.Context, name string, key StateKey, sc
 	return StateKey{ScopeKey: scopeKey, ActorKey: actorKey, DraftID: strings.TrimSpace(key.DraftID)}, nil
 }
 
-// ExtendRun refreshes the optional expiration deadline for a run.
+// ExtendRun moves a run's expiration deadline forward by lifetime. It never
+// shortens an existing deadline and does not change the configured TTL.
 func (s *Service) ExtendRun(ctx context.Context, name string, key StateKey, lifetime time.Duration) error {
 	if lifetime <= 0 {
 		return errors.New("run lifetime must be positive")
 	}
+	record, err := s.repo.FindRecord(ctx, name, key)
+	if err != nil {
+		return err
+	}
 	expiresAt := time.Now().UTC().Add(lifetime)
+	if record.AccessExpiresAt != nil && record.AccessExpiresAt.After(expiresAt) {
+		expiresAt = *record.AccessExpiresAt
+	}
 	return s.repo.SetRunExpiry(ctx, name, key, expiresAt)
+}
+
+// SetRunTTL configures the duration used by automatic run extensions. It does
+// not change the run's current expiration deadline.
+func (s *Service) SetRunTTL(ctx context.Context, name string, key StateKey, lifetime time.Duration) error {
+	if lifetime <= 0 {
+		return errors.New("run lifetime must be positive")
+	}
+	return s.repo.SetRunTTL(ctx, name, key, lifetime)
 }
 
 // CleanupExpiredRuns removes expired runs and their action claims.
