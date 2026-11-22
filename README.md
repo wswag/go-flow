@@ -310,7 +310,13 @@ within that `DraftID`. A repeated commit returns the current step snapshot,
 which is already the next step after a successful transition. To start over,
 discard the old run and call `NewRun` again. Generic one-off operations can
 also use `service.ClaimAction(ctx, chainName, runKey, actionKey)`; it returns
-`true` only for the first claim. Discarding the run removes its action claims.
+`true` only for the first claim. Discarding the run removes its action claims. Manual and automatic commits use
+the same claim. If another commit is in progress, or its callback succeeded but
+the transition could not be saved, the service returns `assistants.ErrCommitClaimed`;
+use `PersistCommitOutcome` to recover a known outcome. A callback error releases
+the claim so the operation can be retried. Commit callbacks receive a stable
+`CommitContext.IdempotencyKey` for the run and step, including across retries and
+manual/automatic commits. Applications can use it to deduplicate external effects.
 Set `ReuseOpen` to return the newest unfinished run for the same actor and
 scope. Set `DiscardOpen` to discard unfinished runs before creating a new one.
 Set `ExpiresIn` in `NewRunOptions` to enable expiration. `ResolveRun` checks the
