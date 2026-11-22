@@ -3,6 +3,7 @@ package assistants
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -259,6 +260,9 @@ func (c PrepareContext) Step(name string) (StepSnapshot, bool) {
 type CommitContext struct {
 	PrepareContext
 	Step StepSnapshot
+	// IdempotencyKey is stable for the same run and step, across manual and
+	// automatic commits. Applications can pass it to external services.
+	IdempotencyKey string
 }
 
 // NewTokenBuilder creates a token tagged with the assistant chain and the step
@@ -1134,16 +1138,6 @@ func (s *Service) commitStep(ctx context.Context, chainName string, key StateKey
 		// the action callback is never invoked twice in this run.
 		return s.CurrentStep(ctx, chain.name, key)
 	}
-	claimedOnce := false
-	if stepDef.OncePerRun {
-		claimedOnce, err = s.repo.ClaimAction(ctx, chain.name, key, "step:"+stepDef.Name)
-		if err != nil {
-			return StepSnapshot{}, ChainSnapshot{}, err
-		}
-		if !claimedOnce {
-			return s.CurrentStep(ctx, chain.name, key)
-		}
-	}
 	if !persistCommitInput && commitInput != nil {
 		transientRaw, marshalErr := marshalRaw(commitInput)
 		if marshalErr != nil {
@@ -1181,20 +1175,25 @@ func (s *Service) commitStep(ctx context.Context, chainName string, key StateKey
 	commitCtx := CommitContext{
 		PrepareContext: prepare,
 		Step:           currentStep,
+		IdempotencyKey: commitIdempotencyKey(key, currentStep.Name),
 	}
 	var outcome *CommitOutcome
 	commitFn := stepDef.Commit
 	if isCommittedUpdate {
 		commitFn = stepDef.UpdatePolicy.Commit
 	}
-	if commitFn != nil {
-		outcome, err = commitFn(ctx, commitCtx)
-		if err != nil {
-			if claimedOnce {
-				_ = s.repo.ReleaseAction(ctx, key.DraftID, "step:"+stepDef.Name)
-			}
-			return StepSnapshot{}, ChainSnapshot{}, err
+	outcome, err = s.invokeCommit(ctx, chain.name, key, stepDef, commitFn, commitCtx)
+	if errors.Is(err, ErrCommitClaimed) {
+		latest, loadErr := s.loadState(ctx, chain.name, key)
+		if loadErr != nil {
+			return StepSnapshot{}, ChainSnapshot{}, loadErr
 		}
+		if latest.Steps[currentStep.Name].CompletedAt != nil {
+			return s.CurrentStep(ctx, chain.name, key)
+		}
+	}
+	if err != nil {
+		return StepSnapshot{}, ChainSnapshot{}, err
 	}
 	if outcome == nil {
 		outcome = &CommitOutcome{}
@@ -1223,6 +1222,41 @@ func (s *Service) commitStep(ctx context.Context, chainName string, key StateKey
 		return StepSnapshot{}, ChainSnapshot{}, err
 	}
 	return s.CurrentStep(ctx, chain.name, key)
+}
+
+// ErrCommitClaimed indicates that a once-per-run commit is in progress or
+// requires recovery after its callback ran but the state could not be saved.
+var ErrCommitClaimed = errors.New("assistant step commit already claimed")
+
+func commitIdempotencyKey(key StateKey, stepName string) string {
+	// JSON encodes the tuple unambiguously even when names contain separators.
+	data, _ := json.Marshal([]string{strings.TrimSpace(key.DraftID), strings.TrimSpace(stepName)})
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func (s *Service) invokeCommit(ctx context.Context, chainName string, key StateKey, step compiledStep, fn CommitFunc, commit CommitContext) (*CommitOutcome, error) {
+	claimed := false
+	if step.OncePerRun {
+		var err error
+		claimed, err = s.repo.ClaimAction(ctx, chainName, key, "step:"+step.Name)
+		if err != nil {
+			return nil, err
+		}
+		if !claimed {
+			return nil, fmt.Errorf("%w: %s", ErrCommitClaimed, step.Name)
+		}
+	}
+	if fn == nil {
+		return nil, nil
+	}
+	outcome, err := fn(ctx, commit)
+	if err != nil && claimed {
+		if releaseErr := s.repo.ReleaseAction(ctx, key.DraftID, "step:"+step.Name); releaseErr != nil {
+			return nil, errors.Join(err, fmt.Errorf("release assistant commit claim: %w", releaseErr))
+		}
+	}
+	return outcome, err
 }
 
 // ResetStep verwirft den Zustand ab einem bestimmten Schritt und stellt die Kette dorthin zurück.
@@ -1460,14 +1494,23 @@ func (s *Service) resolveCurrentChain(ctx context.Context, chainName string, key
 		}
 		stepState := state.Steps[currentStep.Name]
 		var outcome *CommitOutcome
-		if commitFn != nil {
-			outcome, err = commitFn(ctx, CommitContext{
-				PrepareContext: prepare,
-				Step:           stepSnapshot,
-			})
-			if err != nil {
-				return ChainSnapshot{}, err
+		outcome, err = s.invokeCommit(ctx, chain.name, key, currentStep, commitFn, CommitContext{
+			PrepareContext: prepare,
+			Step:           stepSnapshot,
+			IdempotencyKey: commitIdempotencyKey(key, currentStep.Name),
+		})
+		if errors.Is(err, ErrCommitClaimed) {
+			latest, loadErr := s.loadState(ctx, chain.name, key)
+			if loadErr != nil {
+				return ChainSnapshot{}, loadErr
 			}
+			if latest.Steps[currentStep.Name].CompletedAt != nil {
+				state = latest
+				continue
+			}
+		}
+		if err != nil {
+			return ChainSnapshot{}, err
 		}
 		if outcome == nil {
 			outcome = &CommitOutcome{}

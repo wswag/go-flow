@@ -3,6 +3,7 @@ package assistants
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1378,5 +1379,83 @@ func TestAssistantServiceClientCurrentStepReturnsOnlyAllowListedFields(t *testin
 	}
 	if strings.Contains(string(step.Input), "must-not-leak") || !strings.Contains(string(step.Input), "Sichtbar") {
 		t.Fatalf("client input leaked or omitted projection: %s", step.Input)
+	}
+}
+
+func TestOncePerRunAutoCommitAndManualCommitShareClaim(t *testing.T) {
+	svc := openAssistantTestService(t)
+	other := NewService(svc.repo)
+	entered := make(chan string, 1)
+	unblock := make(chan struct{})
+	var calls atomic.Int32
+	def := ChainDefinition{Name: "once-auto", Steps: []StepDefinition{
+		{Name: "first", Sequence: 1, OncePerRun: true,
+			AutoCommit: AutoCommitDefinition{Predicate: func(context.Context, PrepareContext) (bool, error) { return true, nil }},
+			Commit: func(_ context.Context, c CommitContext) (*CommitOutcome, error) {
+				calls.Add(1)
+				entered <- c.IdempotencyKey
+				<-unblock
+				return nil, nil
+			}},
+		{Name: "next", Sequence: 2},
+	}}
+	for _, service := range []*Service{svc, other} {
+		if err := service.RegisterChain(def); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key := newAssistantTestRun(t, svc, def.Name, StateKey{ScopeKey: "scope"})
+	done := make(chan error, 1)
+	go func() { _, _, err := svc.CurrentStep(context.Background(), def.Name, key); done <- err }()
+	idempotencyKey := <-entered
+	if idempotencyKey == "" || idempotencyKey != commitIdempotencyKey(key, "first") {
+		t.Fatalf("unexpected idempotency key %q", idempotencyKey)
+	}
+	if _, _, err := other.CommitStep(context.Background(), def.Name, key, "first"); !errors.Is(err, ErrCommitClaimed) {
+		t.Fatalf("concurrent commit error = %v", err)
+	}
+	close(unblock)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := other.CommitStep(context.Background(), def.Name, key, "first"); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("callback called %d times", calls.Load())
+	}
+}
+
+func TestOncePerRunAutoCommitRetriesCallbackError(t *testing.T) {
+	svc := openAssistantTestService(t)
+	var calls int
+	var keys []string
+	if err := svc.RegisterChain(ChainDefinition{Name: "retry-auto", Steps: []StepDefinition{
+		{Name: "first", Sequence: 1, OncePerRun: true, AutoCommit: AutoCommitDefinition{
+			Predicate: func(context.Context, PrepareContext) (bool, error) { return true, nil },
+			Commit: func(_ context.Context, c CommitContext) (*CommitOutcome, error) {
+				calls++
+				keys = append(keys, c.IdempotencyKey)
+				if calls == 1 {
+					return nil, errors.New("retry")
+				}
+				return nil, nil
+			},
+		}}, {Name: "next", Sequence: 2},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	key := newAssistantTestRun(t, svc, "retry-auto", StateKey{ScopeKey: "scope"})
+	if _, _, err := svc.CurrentStep(context.Background(), "retry-auto", key); err == nil {
+		t.Fatal("expected callback error")
+	}
+	if _, _, err := svc.CurrentStep(context.Background(), "retry-auto", key); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || keys[0] == "" || keys[0] != keys[1] {
+		t.Fatalf("calls = %d, keys = %v", calls, keys)
+	}
+	if keys[0] == commitIdempotencyKey(StateKey{DraftID: "another"}, "first") || keys[0] == commitIdempotencyKey(key, "other") {
+		t.Fatal("key must distinguish runs and steps")
 	}
 }
