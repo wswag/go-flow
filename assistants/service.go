@@ -20,10 +20,19 @@ import (
 	"gorm.io/gorm"
 )
 
+// PrepareFunc derives a step's input from the current run state.
 type PrepareFunc func(ctx context.Context, prepare PrepareContext) (any, error)
+
+// CommitFunc performs the step's action and may return a result and next step.
 type CommitFunc func(ctx context.Context, commit CommitContext) (*CommitOutcome, error)
+
+// AutoCommitPredicate reports whether an automatic step should be committed.
 type AutoCommitPredicate func(ctx context.Context, prepare PrepareContext) (bool, error)
+
+// UpdatePolicyPredicate authorizes an update to a completed step.
 type UpdatePolicyPredicate func(ctx context.Context, update UpdatePolicyContext) (bool, error)
+
+// UpdatePolicyInvalidate decides whether an update makes a later step stale.
 type UpdatePolicyInvalidate func(ctx context.Context, update UpdatePolicyContext, following StepSnapshot) (bool, error)
 
 // JumpToUnreachedPredicate permits a step to prove that it is reachable from
@@ -31,6 +40,8 @@ type UpdatePolicyInvalidate func(ctx context.Context, update UpdatePolicyContext
 // result yet. This is useful for workflow-wait steps whose parent reference is
 // stored by the preceding transition.
 type JumpToUnreachedPredicate func(ctx context.Context, prepare PrepareContext) (bool, error)
+
+// ChainPreconditionFunc rejects operations when application conditions fail.
 type ChainPreconditionFunc func(ctx context.Context, key StateKey) error
 
 // ClientResultContext is the trusted server-side context from which a step
@@ -136,14 +147,19 @@ func ClientResultFromInputFields(fields ...string) ClientResultFunc {
 
 // AutoCommitDefinition beschreibt Schritte, die sich bei erfüllter Bedingung selbst weiterstellen.
 type AutoCommitDefinition struct {
+	// Predicate is evaluated when the step is reached; nil disables auto-commit.
 	Predicate AutoCommitPredicate
-	Commit    CommitFunc
+	// Commit overrides StepDefinition.Commit for automatic commits; nil uses it.
+	Commit CommitFunc
 }
 
 // UpdatePolicyDefinition beschreibt, ob und wie ein bereits erledigter Schritt nachträglich geändert werden darf.
 type UpdatePolicyDefinition struct {
-	CanUpdate           UpdatePolicyPredicate
-	Commit              CommitFunc
+	// CanUpdate must authorize the edit; nil disallows updates.
+	CanUpdate UpdatePolicyPredicate
+	// Commit handles the update; nil falls back to StepDefinition.Commit.
+	Commit CommitFunc
+	// InvalidateFollowing selects later steps made stale by the edit; nil selects all.
 	InvalidateFollowing UpdatePolicyInvalidate
 }
 
@@ -156,17 +172,28 @@ const (
 
 // StepDefinition beschreibt einen einzelnen Schritt innerhalb einer Kette.
 type StepDefinition struct {
-	Name                 string
-	Sequence             int
-	Input                any
-	Prepare              PrepareFunc
-	Commit               CommitFunc
-	AutoCommit           AutoCommitDefinition
-	UpdatePolicy         UpdatePolicyDefinition
+	// Name uniquely identifies this step within the chain.
+	Name string
+	// Sequence determines default order; lower values run first.
+	Sequence int
+	// Input is the initial input model, encoded as JSON.
+	Input any
+	// Prepare derives the step input from earlier run state.
+	Prepare PrepareFunc
+	// Commit runs when the step is manually committed.
+	Commit CommitFunc
+	// AutoCommit optionally commits the step when its predicate becomes true.
+	AutoCommit AutoCommitDefinition
+	// UpdatePolicy controls edits after this step has completed.
+	UpdatePolicy UpdatePolicyDefinition
+	// AllowJumpToUnreached permits jumps here without recorded progress.
 	AllowJumpToUnreached bool
-	CanJumpToUnreached   JumpToUnreachedPredicate
-	WorkflowReference    WorkflowReferenceFunc
-	ClientResult         ClientResultFunc
+	// CanJumpToUnreached conditionally authorizes such jumps.
+	CanJumpToUnreached JumpToUnreachedPredicate
+	// WorkflowReference identifies workflows whose events may advance this step.
+	WorkflowReference WorkflowReferenceFunc
+	// ClientResult explicitly projects step data exposed to clients.
+	ClientResult ClientResultFunc
 	// OncePerRun makes the first successful commit authoritative for this step
 	// until the chain state is discarded and a new run is started.
 	OncePerRun bool
@@ -175,12 +202,18 @@ type StepDefinition struct {
 // ChainDefinition registriert eine benannte Schrittkette mit sortierten Schritten.
 // Version controls which open runs may be reused. Version 0 is unversioned and cannot be reused.
 type ChainDefinition struct {
-	Name    string
+	// Name identifies the chain and is used to find its runs.
+	Name string
+	// Version identifies this definition; positive versions allow open-run reuse.
 	Version int
 	// UserInterfaces are shared by every run of this registered assistant.
-	UserInterfaces     []any
-	Steps              []StepDefinition
-	Precondition       ChainPreconditionFunc
+	// UserInterfaces are dependencies shared by every run of this assistant.
+	UserInterfaces []any
+	// Steps are ordered by Sequence.
+	Steps []StepDefinition
+	// Precondition validates application-specific conditions before operations.
+	Precondition ChainPreconditionFunc
+	// CompletionBehavior controls whether completed runs reset or remain complete.
 	CompletionBehavior ChainCompletionBehavior
 }
 
