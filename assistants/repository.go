@@ -279,6 +279,12 @@ func (r *Repository) SetRunExpiry(ctx context.Context, name string, key StateKey
 	return r.db.WithContext(ctx).Model(&ChainRecord{}).Where("name = ? AND scope_key = ? AND actor_key = ? AND draft_id = ?", strings.TrimSpace(name), strings.TrimSpace(key.ScopeKey), strings.TrimSpace(key.ActorKey), strings.TrimSpace(key.DraftID)).Update("access_expires_at", expiresAt.UTC()).Error
 }
 
+func (r *Repository) SetRunTTL(ctx context.Context, name string, key StateKey, lifetime time.Duration) error {
+	return r.db.WithContext(ctx).Model(&ChainRecord{}).
+		Where("name = ? AND scope_key = ? AND actor_key = ? AND draft_id = ?", strings.TrimSpace(name), strings.TrimSpace(key.ScopeKey), strings.TrimSpace(key.ActorKey), strings.TrimSpace(key.DraftID)).
+		Update("run_ttl_seconds", int64(lifetime/time.Second)).Error
+}
+
 // CleanupExpiredRuns deletes expired run records and their action claims.
 func (r *Repository) CleanupRuns(ctx context.Context, options CleanupRunsOptions) (int64, error) {
 	if !options.Expired && options.MinimumAge <= 0 && len(options.Statuses) == 0 {
