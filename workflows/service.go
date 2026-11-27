@@ -791,7 +791,7 @@ func (s *Service) RetryFlow(ctx context.Context, ref FlowRef, nodeID uint, setKe
 	if selectedCheckpoint || node.NodeIndex == startNodeIndex {
 		setKey = strings.TrimSpace(setKey)
 		if setKey != "" {
-			startToken, err = tokens.RewriteTokenPayloadSet(startToken, setKey, strings.TrimSpace(value))
+			startToken, err = rewriteEditedTokenPayloadSet(startToken, setKey, value)
 		} else {
 			startToken, err = rewritePrimaryTokenPayloadSet(startToken, value)
 		}
@@ -897,7 +897,7 @@ func (s *Service) updateCurrentNodeStartToken(ctx context.Context, flowInstanceI
 				return parseErr
 			}
 			beforeValue = tokens.TokenPayloadSetString(payload, setKey)
-			updatedRaw, err = tokens.RewriteTokenPayloadSet(inputToken.RawData, setKey, strings.TrimSpace(value))
+			updatedRaw, err = rewriteEditedTokenPayloadSet(inputToken.RawData, setKey, value)
 		} else {
 			beforeValue = workflowTokenEditableValue(inputToken.RawData)
 			updatedRaw, err = rewritePrimaryTokenPayloadSet(inputToken.RawData, value)
@@ -983,7 +983,44 @@ func rewritePrimaryTokenPayloadSet(raw string, value string) (string, error) {
 	if key == "" {
 		return "", errors.New("token payload has no primary editable set")
 	}
-	return tokens.RewriteTokenPayloadSet(raw, key, strings.TrimSpace(value))
+	return rewriteEditedTokenPayloadSet(raw, key, value)
+}
+
+// rewriteEditedTokenPayloadSet interprets editor text according to the existing
+// set's JSON type. String sets contain plain text; other sets contain JSON.
+func rewriteEditedTokenPayloadSet(raw, key, value string) (string, error) {
+	payload, err := tokens.ParseTokenPayload(raw)
+	if err != nil {
+		return "", err
+	}
+	original, ok := payload.Sets[key]
+	if !ok {
+		return "", fmt.Errorf("token set %q does not exist", key)
+	}
+	original = json.RawMessage(strings.TrimSpace(string(original)))
+	value = strings.TrimSpace(value)
+	if len(original) > 0 && original[0] == '"' {
+		return tokens.RewriteTokenPayloadSet(raw, key, value)
+	}
+	if !json.Valid([]byte(value)) || jsonValueKind(original) != jsonValueKind([]byte(value)) {
+		return "", fmt.Errorf("token set %q: expected a valid JSON value of the existing type", key)
+	}
+	return tokens.RewriteTokenPayloadSet(raw, key, json.RawMessage(value))
+}
+
+func jsonValueKind(value []byte) byte {
+	value = []byte(strings.TrimSpace(string(value)))
+	if len(value) == 0 {
+		return 0
+	}
+	switch value[0] {
+	case '{', '[', '"', 'n':
+		return value[0]
+	case 't', 'f':
+		return 'b'
+	default:
+		return '#'
+	}
 }
 
 // DiscardFlowInstance markiert einen fehlgeschlagenen Flow als verworfen.
